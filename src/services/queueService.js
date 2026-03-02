@@ -48,11 +48,12 @@ async function processQueue() {
                 await processJob(job);
             } catch (err) {
                 console.error(`[Queue] Error processing job ${job._id}:`, err.message);
+                console.error(`[Queue] Full error:`, err);
                 job.status = 'failed';
                 job.result = `Internal error: ${err.message}`;
                 await job.save();
                 await notifyInviteFailed(job.targetEmail, err.message);
-                await notifyUser(job.telegramId, job.targetEmail, `Internal error: ${err.message}`);
+                await notifyUser(job.telegramId, job.targetEmail, err.message);
             }
         }
     } finally {
@@ -89,7 +90,9 @@ async function processJob(job) {
     }
 
     // Do the invite via Playwright
+    console.log(`[Queue] Starting invite for ${targetEmail} using account ${account.email}`);
     const result = await inviteTeamMember(account, targetEmail);
+    console.log(`[Queue] Invite result for ${targetEmail}:`, JSON.stringify(result));
 
     if (result.success) {
         // Deduct credit for Telegram users only (web orders already "paid")
@@ -147,12 +150,12 @@ async function processJob(job) {
  * Notify the user via Telegram when invite fails
  */
 async function notifyUser(telegramId, targetEmail, reason) {
-    if (telegramId.startsWith('web_')) return; // web orders don't have telegram chat
+    if (telegramId.startsWith('web_')) return;
     try {
         const { bot } = require('../bot/userHandlers');
+        // Don't use Markdown here — error messages may contain special chars
         await bot.api.sendMessage(telegramId,
-            `❌ *Invite Gagal*\n\n📧 Email: \`${targetEmail}\`\n💬 Alasan: ${reason}\n\nKredit kamu tidak dikurangi. Silakan coba lagi atau hubungi admin.`,
-            { parse_mode: 'Markdown' }
+            `❌ Invite Gagal\n\n📧 Email: ${targetEmail}\n💬 Alasan: ${reason}\n\nKredit kamu tidak dikurangi. Silakan coba lagi atau hubungi admin.`
         );
     } catch (err) {
         console.error('[Queue] Failed to notify user:', err.message);
