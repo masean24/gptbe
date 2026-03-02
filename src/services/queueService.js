@@ -52,6 +52,7 @@ async function processQueue() {
                 job.result = `Internal error: ${err.message}`;
                 await job.save();
                 await notifyInviteFailed(job.targetEmail, err.message);
+                await notifyUser(job.telegramId, job.targetEmail, `Internal error: ${err.message}`);
             }
         }
     } finally {
@@ -71,6 +72,7 @@ async function processJob(job) {
             job.result = 'credits_insufficient';
             await job.save();
             await notifyInviteFailed(targetEmail, 'Kredit tidak cukup');
+            await notifyUser(telegramId, targetEmail, 'Kredit tidak cukup');
             return;
         }
     }
@@ -82,6 +84,7 @@ async function processJob(job) {
         job.result = 'no_account_available';
         await job.save();
         await notifyInviteFailed(targetEmail, 'Tidak ada akun tersedia');
+        await notifyUser(telegramId, targetEmail, 'Tidak ada akun tersedia saat ini. Coba lagi nanti.');
         return;
     }
 
@@ -136,6 +139,23 @@ async function processJob(job) {
         job.result = result.message;
         await job.save();
         await notifyInviteFailed(targetEmail, result.message);
+        await notifyUser(telegramId, targetEmail, result.message);
+    }
+}
+
+/**
+ * Notify the user via Telegram when invite fails
+ */
+async function notifyUser(telegramId, targetEmail, reason) {
+    if (telegramId.startsWith('web_')) return; // web orders don't have telegram chat
+    try {
+        const { bot } = require('../bot/userHandlers');
+        await bot.api.sendMessage(telegramId,
+            `❌ *Invite Gagal*\n\n📧 Email: \`${targetEmail}\`\n💬 Alasan: ${reason}\n\nKredit kamu tidak dikurangi. Silakan coba lagi atau hubungi admin.`,
+            { parse_mode: 'Markdown' }
+        );
+    } catch (err) {
+        console.error('[Queue] Failed to notify user:', err.message);
     }
 }
 
