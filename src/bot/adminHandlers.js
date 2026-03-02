@@ -266,11 +266,16 @@ function registerAdminHandlers(bot) {
         const msg = await ctx.reply(`⏳ Generating ${count} kode...`);
         const codes = await generateCodes(String(ctx.from.id), count, credits, prefix);
 
+        const webUrl = process.env.FRONTEND_URL || '';
+        const webPass = process.env.WEB_ACCESS_PASSWORD || '';
         const codeText = codes.join('\n');
-        await ctx.api.editMessageText(ctx.chat.id, msg.message_id,
-            `✅ *${count} Kode Berhasil Dibuat!*\n💎 Nilai: ${credits} kredit/kode\n\n\`\`\`\n${codeText}\n\`\`\``,
-            { parse_mode: 'Markdown' }
-        );
+        let reply = `✅ *${count} Kode Berhasil Dibuat!*\n💎 Nilai: ${credits} kredit/kode\n\n\`\`\`\n${codeText}\n\`\`\``;
+        reply += `\n\n📱 Redeem via bot: \`/redeem KODE\``;
+        if (webUrl) {
+            reply += `\n🌐 Redeem via web: ${webUrl}`;
+            if (webPass) reply += `\n🔑 Password web: \`${webPass}\``;
+        }
+        await ctx.api.editMessageText(ctx.chat.id, msg.message_id, reply, { parse_mode: 'Markdown' });
     }));
 
     // ---- ADD CREDIT ----

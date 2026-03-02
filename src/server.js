@@ -20,14 +20,30 @@ const app = express();
 // Middleware
 // =========================================================
 app.use(helmet());
+
+// CORS — strip trailing slash and allow web frontend
+const frontendUrl = (process.env.FRONTEND_URL || '').replace(/\/+$/, '');
 app.use(cors({
-    origin: process.env.FRONTEND_URL || '*',
+    origin: frontendUrl || '*',
     credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 app.use(express.json());
 
 const apiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100 });
 app.use('/api/', apiLimiter);
+
+// =========================================================
+// PUBLIC: Verify web access password
+// =========================================================
+app.post('/api/web/verify-password', (req, res) => {
+    const { password } = req.body;
+    const webPassword = process.env.WEB_ACCESS_PASSWORD || '';
+    if (!webPassword) return res.json({ valid: true }); // no password set = open
+    if (password === webPassword) return res.json({ valid: true });
+    return res.status(401).json({ valid: false, error: 'Password salah' });
+});
 
 // =========================================================
 // Auth middleware for Admin API (JWT)
