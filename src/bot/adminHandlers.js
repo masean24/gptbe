@@ -22,7 +22,11 @@ function generateCode(prefix = 'GPTI') {
 // =========================================================
 function adminOnly(handler) {
     return async (ctx) => {
-        if (!isAdmin(ctx)) return ctx.reply('🚫 Akses ditolak.');
+        if (!isAdmin(ctx)) {
+            // Silently ignore non-admins — don't reveal admin features exist
+            if (ctx.callbackQuery) await ctx.answerCallbackQuery();
+            return;
+        }
         return handler(ctx);
     };
 }
@@ -79,6 +83,11 @@ async function generateCodes(adminId, count, creditsEach, prefix = 'GPTI', note 
 // Register all admin handlers on a bot instance
 // =========================================================
 function registerAdminHandlers(bot) {
+
+    // Global error handler — prevent bot crash on handler errors
+    bot.catch((err) => {
+        console.error('[Bot] Error caught:', err.message || err);
+    });
 
     bot.command('admin', adminOnly(showAdminMenu));
 
@@ -149,7 +158,7 @@ function registerAdminHandlers(bot) {
     bot.callbackQuery('adm_addaccount', adminOnly(async (ctx) => {
         await ctx.answerCallbackQuery();
         await ctx.editMessageText(
-            '➕ *TAMBAH AKUN CHATGPT*\n\nKirim dalam format:\n`/addaccount email password 2fa_secret`\n\n2fa_secret boleh dikosongkan jika tidak ada 2FA.',
+            '➕ *TAMBAH AKUN CHATGPT*\n\nKirim dalam format:\n`/addaccount email password 2fa\_secret`\n\n2fa\_secret boleh dikosongkan jika tidak ada 2FA.',
             { parse_mode: 'Markdown', reply_markup: new InlineKeyboard().text('⬅️ Kembali', 'adm_back') }
         );
     }));
