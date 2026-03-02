@@ -16,6 +16,10 @@ async function main() {
     // Register admin commands on the same bot instance
     registerAdminHandlers(bot);
 
+    // Connect notify service to bot (for channel/group webhooks)
+    const { setBot } = require('./services/notifyService');
+    setBot(bot);
+
     // Start Express server (for API + webhooks)
     const { startServer } = require('./server');
     startServer(bot);

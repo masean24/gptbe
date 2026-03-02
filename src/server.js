@@ -12,6 +12,7 @@ const Transaction = require('./models/Transaction');
 const InviteJob = require('./models/InviteJob');
 const { handleWebhookPayload, verifyWebhookSecret, createPayment, CREDIT_PRICE } = require('./services/qrisService');
 const { enqueue } = require('./services/queueService');
+const { notifyRedeemUsed, notifyPaymentReceived, notifyNewWebOrder } = require('./services/notifyService');
 
 const app = express();
 
@@ -29,7 +30,7 @@ const apiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100 });
 app.use('/api/', apiLimiter);
 
 // =========================================================
-// Auth middleware for Web API (JWT)
+// Auth middleware for Admin API (JWT)
 // =========================================================
 function authMiddleware(req, res, next) {
     const token = req.headers.authorization?.replace('Bearer ', '');
@@ -52,120 +53,115 @@ function adminMiddleware(req, res, next) {
 }
 
 // =========================================================
-// Public: Login via Telegram ID (simple auth for web)
-// Returns a JWT token
+// PUBLIC: Redeem code + invite email (NO LOGIN REQUIRED)
+// Step 1: User enters redeem code → validates and holds
+// Step 2: User enters email → uses credit from code and enqueues invite
 // =========================================================
-app.post('/api/auth/login', async (req, res) => {
-    const { telegramId, accessCode } = req.body; // accessCode optional future use
-    if (!telegramId) return res.status(400).json({ error: 'telegramId required' });
+app.post('/api/web/redeem-invite', async (req, res) => {
+    const { code, email } = req.body;
 
-    const user = await User.findOneAndUpdate(
-        { telegramId: String(telegramId) },
-        { lastActivityAt: new Date() },
-        { new: true }
-    );
-    if (!user) return res.status(404).json({ error: 'User not found. Start the bot first.' });
-    if (user.isBlocked) return res.status(403).json({ error: 'Account blocked.' });
-
-    const adminIds = (process.env.ADMIN_IDS || '').split(',').map(id => id.trim());
-    const isAdmin = adminIds.includes(String(telegramId));
-
-    const token = jwt.sign(
-        { telegramId: user.telegramId, username: user.username, isAdmin },
-        process.env.JWT_SECRET,
-        { expiresIn: '7d' }
-    );
-
-    res.json({ token, user: { telegramId: user.telegramId, username: user.username, credits: user.credits, isAdmin } });
-});
-
-// =========================================================
-// User: Get own profile
-// =========================================================
-app.get('/api/me', authMiddleware, async (req, res) => {
-    const user = await User.findOne({ telegramId: req.user.telegramId });
-    if (!user) return res.status(404).json({ error: 'Not found' });
-    const adminIds = (process.env.ADMIN_IDS || '').split(',').map(id => id.trim());
-    res.json({
-        telegramId: user.telegramId,
-        username: user.username,
-        firstName: user.firstName,
-        credits: user.credits,
-        totalInvites: user.totalInvites,
-        isAdmin: adminIds.includes(String(user.telegramId)),
-    });
-});
-
-// =========================================================
-// User: Submit invite
-// =========================================================
-app.post('/api/invite', authMiddleware, async (req, res) => {
-    const { email } = req.body;
+    if (!code) return res.status(400).json({ error: 'Kode redeem diperlukan' });
     if (!email || !email.includes('@')) return res.status(400).json({ error: 'Email tidak valid' });
 
-    const user = await User.findOne({ telegramId: req.user.telegramId });
-    if (!user || user.credits < 1) {
-        return res.status(400).json({ error: 'Saldo kredit tidak cukup' });
-    }
+    const targetEmail = email.trim().toLowerCase();
 
-    const account = await Account.findOne({ status: 'active', $expr: { $lt: ['$inviteCount', '$maxInvites'] } });
-    if (!account) return res.status(503).json({ error: 'Tidak ada akun tersedia saat ini' });
-
-    const { jobId, position } = await enqueue(String(req.user.telegramId), email.trim().toLowerCase());
-    res.json({ jobId, position, message: position > 1 ? `Antrian ke-${position}` : 'Sedang diproses...' });
-});
-
-// =========================================================
-// User: Redeem code
-// =========================================================
-app.post('/api/redeem', authMiddleware, async (req, res) => {
-    const { code } = req.body;
-    if (!code) return res.status(400).json({ error: 'Kode diperlukan' });
-
+    // Validate code
     const codeDoc = await RedeemCode.findOne({ code: code.toUpperCase(), isUsed: false });
     if (!codeDoc) return res.status(400).json({ error: 'Kode tidak valid atau sudah digunakan' });
     if (codeDoc.expiresAt && new Date() > codeDoc.expiresAt) {
         return res.status(400).json({ error: 'Kode sudah kedaluwarsa' });
     }
 
+    // Check available account
+    const account = await Account.findOne({ status: 'active', $expr: { $lt: ['$inviteCount', '$maxInvites'] } });
+    if (!account) return res.status(503).json({ error: 'Semua akun sedang penuh. Coba lagi nanti.' });
+
+    // Mark code as used
     codeDoc.isUsed = true;
-    codeDoc.usedBy = req.user.telegramId;
+    codeDoc.usedBy = `web_${targetEmail}`;
     codeDoc.usedAt = new Date();
     await codeDoc.save();
 
-    const user = await User.findOneAndUpdate(
-        { telegramId: req.user.telegramId },
-        { $inc: { credits: codeDoc.credits } },
-        { new: true }
-    );
-
+    // Log transaction
     await Transaction.create({
-        telegramId: req.user.telegramId,
+        telegramId: `web_${targetEmail}`,
         type: 'redeem',
         credits: codeDoc.credits,
         redeemCode: code.toUpperCase(),
-        description: `Web redeem ${code.toUpperCase()} (+${codeDoc.credits} kredit)`,
+        description: `Web redeem ${code.toUpperCase()} → invite ${targetEmail}`,
     });
 
-    res.json({ success: true, creditsAdded: codeDoc.credits, newBalance: user.credits });
+    // Enqueue the invite job
+    const { jobId, position } = await enqueue(`web_${targetEmail}`, targetEmail);
+
+    // Notify admin channel
+    await notifyRedeemUsed(code.toUpperCase(), codeDoc.credits, 'web');
+    await notifyNewWebOrder(targetEmail, 'Redeem Code');
+
+    res.json({
+        success: true,
+        jobId,
+        position,
+        message: position > 1
+            ? `✅ Antrian ke-${position}. Email ${targetEmail} akan segera diinvite.`
+            : `✅ Sedang diproses! Email ${targetEmail} akan segera diinvite.`,
+    });
 });
 
 // =========================================================
-// User: Create QRIS payment
+// PUBLIC: Create QRIS payment for email invite (NO LOGIN)
 // =========================================================
-app.post('/api/payment/create', authMiddleware, async (req, res) => {
-    const { credits } = req.body;
-    const creditsToBuy = parseInt(credits);
-    if (!creditsToBuy || creditsToBuy < 1 || creditsToBuy > 50) {
-        return res.status(400).json({ error: 'Jumlah kredit tidak valid (1-50)' });
-    }
+app.post('/api/web/pay', async (req, res) => {
+    const { email } = req.body;
+    if (!email || !email.includes('@')) return res.status(400).json({ error: 'Email tidak valid' });
+
+    const targetEmail = email.trim().toLowerCase();
+
+    // Check available account
+    const account = await Account.findOne({ status: 'active', $expr: { $lt: ['$inviteCount', '$maxInvites'] } });
+    if (!account) return res.status(503).json({ error: 'Semua akun sedang penuh. Coba lagi nanti.' });
 
     try {
-        const payment = await createPayment(req.user.telegramId, creditsToBuy);
-        res.json(payment);
+        // Create payment with email as identifier (1 credit = 1 invite)
+        const payment = await createPayment(`web_${targetEmail}`, 1);
+
+        // Store email in a pending web order (we'll use Transaction with status pending)
+        await Transaction.create({
+            telegramId: `web_${targetEmail}`,
+            type: 'qris',
+            credits: 1,
+            amount: payment.amountTotal,
+            qrisTransactionId: payment.transactionId,
+            qrisStatus: 'pending',
+            description: `QRIS bayar invite ${targetEmail}`,
+        });
+
+        await notifyNewWebOrder(targetEmail, `QRIS Rp ${payment.amountTotal.toLocaleString('id-ID')}`);
+
+        res.json({
+            success: true,
+            transactionId: payment.transactionId,
+            qrisContent: payment.qrisContent,
+            amountTotal: payment.amountTotal,
+            amountUnique: payment.amountUnique,
+            expiresAt: payment.expiresAt,
+            email: targetEmail,
+        });
     } catch (err) {
         res.status(500).json({ error: 'Gagal membuat QRIS: ' + err.message });
     }
+});
+
+// =========================================================
+// PUBLIC: Check payment status for web order
+// =========================================================
+app.get('/api/web/pay/status/:transactionId', async (req, res) => {
+    const { transactionId } = req.params;
+
+    const txn = await Transaction.findOne({ qrisTransactionId: transactionId, type: 'qris' });
+    if (!txn) return res.status(404).json({ error: 'Transaksi tidak ditemukan' });
+
+    res.json({ status: txn.qrisStatus, email: txn.telegramId.replace('web_', '') });
 });
 
 // =========================================================
@@ -180,17 +176,25 @@ app.post('/api/webhooks/qris', async (req, res) => {
         const result = await handleWebhookPayload(req.body);
 
         if (result.matched && !result.alreadyProcessed) {
-            // Send Telegram notification to user
             res.json({ success: true, matched: true });
 
-            // We import bot lazily to avoid circular dep
-            try {
-                const { bot } = require('./bot/userHandlers');
-                await bot.api.sendMessage(result.telegramId,
-                    `✅ *Pembayaran Diterima!*\n\n💎 +${result.creditsAdded} kredit telah ditambahkan!\n💰 Saldo: *${result.newBalance} kredit*\n\nGunakan /gpti email@example.com untuk invite sekarang!`,
-                    { parse_mode: 'Markdown' }
-                );
-            } catch (_) { }
+            // Check if this is a web order (telegramId starts with "web_")
+            if (result.telegramId && result.telegramId.startsWith('web_')) {
+                const email = result.telegramId.replace('web_', '');
+                // Auto-enqueue invite for web payment
+                await enqueue(result.telegramId, email);
+                await notifyPaymentReceived(result.amount || CREDIT_PRICE, result.creditsAdded || 1, 'web');
+            } else {
+                // Telegram user — notify via bot
+                try {
+                    const { bot } = require('./bot/userHandlers');
+                    await bot.api.sendMessage(result.telegramId,
+                        `✅ *Pembayaran Diterima!*\n\n💎 +${result.creditsAdded} kredit telah ditambahkan!\n💰 Saldo: *${result.newBalance} kredit*\n\nGunakan /gpti email@example.com untuk invite sekarang!`,
+                        { parse_mode: 'Markdown' }
+                    );
+                    await notifyPaymentReceived(result.amount || CREDIT_PRICE, result.creditsAdded, 'telegram');
+                } catch (_) { }
+            }
         } else {
             res.json({ success: true, matched: result.matched });
         }
@@ -201,91 +205,38 @@ app.post('/api/webhooks/qris', async (req, res) => {
 });
 
 // =========================================================
-// User: Transaction history
+// PUBLIC: Server status (for web)
 // =========================================================
-app.get('/api/transactions', authMiddleware, async (req, res) => {
-    const txns = await Transaction.find({ telegramId: req.user.telegramId })
-        .sort({ createdAt: -1 }).limit(20);
-    res.json(txns);
-});
-
-// =========================================================
-// Admin: Get all users
-// =========================================================
-app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) => {
-    const { page = 1, limit = 20, search } = req.query;
-    const query = search ? { $or: [{ username: { $regex: search, $options: 'i' } }, { telegramId: search }] } : {};
-    const users = await User.find(query).sort({ credits: -1 }).skip((page - 1) * limit).limit(parseInt(limit));
-    const total = await User.countDocuments(query);
-    res.json({ users, total, page: parseInt(page), limit: parseInt(limit) });
-});
-
-// Admin: Update user credits
-app.post('/api/admin/users/:telegramId/credits', authMiddleware, adminMiddleware, async (req, res) => {
-    const { amount, action } = req.body; // action: 'add' | 'set'
-    const user = await User.findOneAndUpdate(
-        { telegramId: req.params.telegramId },
-        action === 'set' ? { $set: { credits: amount } } : { $inc: { credits: amount } },
-        { new: true }
-    );
-    if (!user) return res.status(404).json({ error: 'User not found' });
-
-    await Transaction.create({
-        telegramId: req.params.telegramId,
-        type: 'admin_gift',
-        credits: amount,
-        description: `Admin web ${action === 'set' ? 'set' : 'gift'} ${amount} kredit`,
+app.get('/api/web/status', async (req, res) => {
+    const activeAccounts = await Account.countDocuments({ status: 'active', $expr: { $lt: ['$inviteCount', '$maxInvites'] } });
+    const pendingJobs = await InviteJob.countDocuments({ status: 'queued' });
+    res.json({
+        online: activeAccounts > 0,
+        availableSlots: activeAccounts,
+        queueLength: pendingJobs,
+        pricePerInvite: CREDIT_PRICE,
     });
-    res.json({ success: true, newBalance: user.credits });
 });
 
-// Admin: Get accounts
-app.get('/api/admin/accounts', authMiddleware, adminMiddleware, async (req, res) => {
-    const accounts = await Account.find().select('-password -twoFASecret -sessionData').sort({ createdAt: -1 });
-    res.json(accounts);
+// =========================================================
+// Admin: Auth login (kept for admin panel)
+// =========================================================
+app.post('/api/auth/login', async (req, res) => {
+    const { telegramId } = req.body;
+    if (!telegramId) return res.status(400).json({ error: 'telegramId required' });
+
+    const adminIds = (process.env.ADMIN_IDS || '').split(',').map(id => id.trim());
+    if (!adminIds.includes(String(telegramId))) {
+        return res.status(403).json({ error: 'Admin only' });
+    }
+
+    const token = jwt.sign({ telegramId: String(telegramId), isAdmin: true }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    res.json({ token, isAdmin: true });
 });
 
-// Admin: Add account
-app.post('/api/admin/accounts', authMiddleware, adminMiddleware, async (req, res) => {
-    const { email, password, twoFASecret = '' } = req.body;
-    if (!email || !password) return res.status(400).json({ error: 'email and password required' });
-    const existing = await Account.findOne({ email });
-    if (existing) return res.status(400).json({ error: 'Email sudah terdaftar' });
-    const acc = await Account.create({ email, password, twoFASecret });
-    res.json({ success: true, id: acc._id });
-});
-
-// Admin: Delete account
-app.delete('/api/admin/accounts/:id', authMiddleware, adminMiddleware, async (req, res) => {
-    await Account.findByIdAndDelete(req.params.id);
-    res.json({ success: true });
-});
-
-// Admin: Reset account
-app.post('/api/admin/accounts/:id/reset', authMiddleware, adminMiddleware, async (req, res) => {
-    const acc = await Account.findByIdAndUpdate(req.params.id, { inviteCount: 0, status: 'active' }, { new: true });
-    if (!acc) return res.status(404).json({ error: 'Account not found' });
-    res.json({ success: true });
-});
-
-// Admin: Generate redeem codes
-app.post('/api/admin/codes/generate', authMiddleware, adminMiddleware, async (req, res) => {
-    const { count = 1, credits = 1, prefix = 'GPTI', note = '' } = req.body;
-    if (count > 100) return res.status(400).json({ error: 'Max 100 codes per request' });
-    const { generateCodes } = require('./bot/adminHandlers');
-    const codes = await generateCodes(req.user.telegramId, count, credits, prefix, note);
-    res.json({ success: true, codes });
-});
-
-// Admin: List unused codes
-app.get('/api/admin/codes', authMiddleware, adminMiddleware, async (req, res) => {
-    const { used } = req.query;
-    const filter = used !== undefined ? { isUsed: used === 'true' } : {};
-    const codes = await RedeemCode.find(filter).sort({ createdAt: -1 }).limit(100);
-    res.json(codes);
-});
-
-// Admin: Stats dashboard
+// =========================================================
+// Admin endpoints (all require auth)
+// =========================================================
 app.get('/api/admin/stats', authMiddleware, adminMiddleware, async (req, res) => {
     const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
     const [totalUsers, totalInvites, todayInvites, accountStats, revenueData, pendingJobs] = await Promise.all([
@@ -296,28 +247,76 @@ app.get('/api/admin/stats', authMiddleware, adminMiddleware, async (req, res) =>
         Transaction.aggregate([{ $match: { type: 'qris', qrisStatus: 'paid' } }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
         InviteJob.countDocuments({ status: 'queued' }),
     ]);
-
     const acMap = {};
     accountStats.forEach(s => acMap[s._id] = s.count);
-
-    res.json({
-        totalUsers,
-        totalInvites,
-        todayInvites,
-        totalRevenue: revenueData[0]?.total || 0,
-        accounts: { active: acMap['active'] || 0, full: acMap['full'] || 0, error: acMap['error'] || 0 },
-        pendingJobs,
-    });
+    res.json({ totalUsers, totalInvites, todayInvites, totalRevenue: revenueData[0]?.total || 0, accounts: { active: acMap['active'] || 0, full: acMap['full'] || 0, error: acMap['error'] || 0 }, pendingJobs });
 });
 
-// Admin: Broadcast via API
+app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) => {
+    const { page = 1, limit = 20, search } = req.query;
+    const query = search ? { $or: [{ username: { $regex: search, $options: 'i' } }, { telegramId: search }] } : {};
+    const users = await User.find(query).sort({ credits: -1 }).skip((page - 1) * limit).limit(parseInt(limit));
+    const total = await User.countDocuments(query);
+    res.json({ users, total, page: parseInt(page), limit: parseInt(limit) });
+});
+
+app.post('/api/admin/users/:telegramId/credits', authMiddleware, adminMiddleware, async (req, res) => {
+    const { amount, action } = req.body;
+    const user = await User.findOneAndUpdate(
+        { telegramId: req.params.telegramId },
+        action === 'set' ? { $set: { credits: amount } } : { $inc: { credits: amount } },
+        { new: true }
+    );
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    await Transaction.create({ telegramId: req.params.telegramId, type: 'admin_gift', credits: amount, description: `Admin ${action === 'set' ? 'set' : 'gift'} ${amount} kredit` });
+    res.json({ success: true, newBalance: user.credits });
+});
+
+app.get('/api/admin/accounts', authMiddleware, adminMiddleware, async (req, res) => {
+    const accounts = await Account.find().select('-password -twoFASecret -sessionData').sort({ createdAt: -1 });
+    res.json(accounts);
+});
+
+app.post('/api/admin/accounts', authMiddleware, adminMiddleware, async (req, res) => {
+    const { email, password, twoFASecret = '' } = req.body;
+    if (!email || !password) return res.status(400).json({ error: 'email and password required' });
+    const existing = await Account.findOne({ email });
+    if (existing) return res.status(400).json({ error: 'Email sudah terdaftar' });
+    const acc = await Account.create({ email, password, twoFASecret });
+    res.json({ success: true, id: acc._id });
+});
+
+app.delete('/api/admin/accounts/:id', authMiddleware, adminMiddleware, async (req, res) => {
+    await Account.findByIdAndDelete(req.params.id);
+    res.json({ success: true });
+});
+
+app.post('/api/admin/accounts/:id/reset', authMiddleware, adminMiddleware, async (req, res) => {
+    const acc = await Account.findByIdAndUpdate(req.params.id, { inviteCount: 0, status: 'active' }, { new: true });
+    if (!acc) return res.status(404).json({ error: 'Account not found' });
+    res.json({ success: true });
+});
+
+app.post('/api/admin/codes/generate', authMiddleware, adminMiddleware, async (req, res) => {
+    const { count = 1, credits = 1, prefix = 'GPTI', note = '' } = req.body;
+    if (count > 100) return res.status(400).json({ error: 'Max 100 codes per request' });
+    const { generateCodes } = require('./bot/adminHandlers');
+    const codes = await generateCodes(req.user.telegramId, count, credits, prefix, note);
+    res.json({ success: true, codes });
+});
+
+app.get('/api/admin/codes', authMiddleware, adminMiddleware, async (req, res) => {
+    const { used } = req.query;
+    const filter = used !== undefined ? { isUsed: used === 'true' } : {};
+    const codes = await RedeemCode.find(filter).sort({ createdAt: -1 }).limit(100);
+    res.json(codes);
+});
+
 app.post('/api/admin/broadcast', authMiddleware, adminMiddleware, async (req, res) => {
     const { message } = req.body;
     if (!message) return res.status(400).json({ error: 'Message required' });
-
     const users = await User.find({ isBlocked: false }).select('telegramId');
     const { bot } = require('./bot/userHandlers');
-
     let sent = 0, failed = 0;
     for (const user of users) {
         try {

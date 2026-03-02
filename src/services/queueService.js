@@ -3,6 +3,7 @@ const Account = require('../models/Account');
 const User = require('../models/User');
 const Transaction = require('../models/Transaction');
 const { inviteTeamMember } = require('./playwrightService');
+const { notifyInviteSuccess, notifyInviteFailed } = require('./notifyService');
 
 let isProcessing = false;
 
@@ -11,7 +12,6 @@ let isProcessing = false;
  */
 async function enqueue(telegramId, targetEmail) {
     const job = await InviteJob.create({ telegramId, targetEmail });
-    // Check queue position
     const position = await InviteJob.countDocuments({ status: 'queued', createdAt: { $lt: job.createdAt } }) + 1;
     processQueue(); // fire and forget
     return { jobId: job._id.toString(), position };
@@ -51,6 +51,7 @@ async function processQueue() {
                 job.status = 'failed';
                 job.result = `Internal error: ${err.message}`;
                 await job.save();
+                await notifyInviteFailed(job.targetEmail, err.message);
             }
         }
     } finally {
@@ -60,14 +61,18 @@ async function processQueue() {
 
 async function processJob(job) {
     const { telegramId, targetEmail } = job;
+    const isWebOrder = telegramId.startsWith('web_');
 
-    // Get user
-    const user = await User.findOne({ telegramId });
-    if (!user || user.credits < 1) {
-        job.status = 'failed';
-        job.result = 'credits_insufficient';
-        await job.save();
-        return;
+    // For Telegram users, check credits
+    if (!isWebOrder) {
+        const user = await User.findOne({ telegramId });
+        if (!user || user.credits < 1) {
+            job.status = 'failed';
+            job.result = 'credits_insufficient';
+            await job.save();
+            await notifyInviteFailed(targetEmail, 'Kredit tidak cukup');
+            return;
+        }
     }
 
     // Get available ChatGPT account
@@ -76,6 +81,7 @@ async function processJob(job) {
         job.status = 'failed';
         job.result = 'no_account_available';
         await job.save();
+        await notifyInviteFailed(targetEmail, 'Tidak ada akun tersedia');
         return;
     }
 
@@ -83,11 +89,14 @@ async function processJob(job) {
     const result = await inviteTeamMember(account, targetEmail);
 
     if (result.success) {
-        // Deduct credit from user
-        user.credits -= 1;
-        user.totalInvites += 1;
-        user.lastActivityAt = new Date();
-        await user.save();
+        // Deduct credit for Telegram users only (web orders already "paid")
+        if (!isWebOrder) {
+            const user = await User.findOne({ telegramId });
+            user.credits -= 1;
+            user.totalInvites += 1;
+            user.lastActivityAt = new Date();
+            await user.save();
+        }
 
         // Increment account invite count
         account.inviteCount += 1;
@@ -108,11 +117,25 @@ async function processJob(job) {
         job.result = result.message;
         job.accountId = account._id.toString();
         await job.save();
+
+        // Notify admin channel
+        await notifyInviteSuccess(targetEmail, account.email);
+
+        // Notify Telegram user via bot
+        if (!isWebOrder) {
+            try {
+                const { bot } = require('../bot/userHandlers');
+                await bot.api.sendMessage(telegramId,
+                    `✅ *Invite Berhasil!*\n\n📧 \`${targetEmail}\` sudah diinvite ke ChatGPT Team!`,
+                    { parse_mode: 'Markdown' }
+                );
+            } catch (_) { }
+        }
     } else {
-        // Don't deduct credits on failure
         job.status = 'failed';
         job.result = result.message;
         await job.save();
+        await notifyInviteFailed(targetEmail, result.message);
     }
 }
 
