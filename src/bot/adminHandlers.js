@@ -157,10 +157,14 @@ function registerAdminHandlers(bot) {
     // ---- ADD ACCOUNT (start flow) ----
     bot.callbackQuery('adm_addaccount', adminOnly(async (ctx) => {
         await ctx.answerCallbackQuery();
-        await ctx.editMessageText(
-            '➕ *TAMBAH AKUN CHATGPT*\n\nKirim dalam format:\n`/addaccount email password 2fa\_secret`\n\n2fa\_secret boleh dikosongkan jika tidak ada 2FA.',
-            { parse_mode: 'Markdown', reply_markup: new InlineKeyboard().text('⬅️ Kembali', 'adm_back') }
-        );
+        const text = '➕ *TAMBAH AKUN CHATGPT*\n\nKirim dalam format:\n`/addaccount email password 2fa_secret`\n\n`2fa_secret` boleh dikosongkan jika tidak ada 2FA.';
+        const opts = { parse_mode: 'Markdown', reply_markup: new InlineKeyboard().text('⬅️ Kembali', 'adm_back') };
+        try {
+            await ctx.editMessageText(text, opts);
+        } catch (err) {
+            console.error('[adm_addaccount] editMessageText failed:', err.message);
+            await ctx.reply(text, opts);
+        }
     }));
 
     // ---- /addaccount command ----
