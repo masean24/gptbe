@@ -157,14 +157,15 @@ bot.command('gpti', async (ctx) => {
 // /beli - Buy credits via QRIS
 // =========================================================
 bot.command('beli', async (ctx) => {
+    const p = (n) => (n * CREDIT_PRICE).toLocaleString('id-ID');
     const keyboard = new InlineKeyboard()
-        .text('1 Kredit — Rp 5.000', 'buy_1')
+        .text(`1 Kredit — Rp ${p(1)}`, 'buy_1')
         .row()
-        .text('3 Kredit — Rp 15.000', 'buy_3')
+        .text(`3 Kredit — Rp ${p(3)}`, 'buy_3')
         .row()
-        .text('5 Kredit — Rp 25.000', 'buy_5')
+        .text(`5 Kredit — Rp ${p(5)}`, 'buy_5')
         .row()
-        .text('10 Kredit — Rp 50.000', 'buy_10');
+        .text(`10 Kredit — Rp ${p(10)}`, 'buy_10');
 
     await ctx.reply(
         `💰 *BELI KREDIT*\n━━━━━━━━━━━━━━━━━━━━\n\n` +
@@ -189,23 +190,34 @@ bot.callbackQuery(/^buy_(\d+)$/, async (ctx) => {
         const expiresAt = new Date(payment.expiresAt);
         const expiresStr = expiresAt.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
 
-        // Generate QR code image from QRIS content
-        const qr = require('qrcode');
-        const qrBuffer = await qr.toBuffer(payment.qrisContent, { type: 'png', width: 400 });
+        const caption =
+            `🧾 *QRIS PAYMENT*\n━━━━━━━━━━━━━━━━━━━━\n\n` +
+            `💎 Kredit: *${creditsToBuy}x*\n` +
+            `💵 Total Bayar: *Rp ${totalFormatted}*\n` +
+            `  _(Nominal unik: ${payment.amountUnique} — transfer tepat segini)_\n\n` +
+            `⏰ Expired: *${expiresStr}*\n\n` +
+            `📸 Scan QRIS di atas menggunakan aplikasi bank/e-wallet apapun.\n\n` +
+            `_Kredit akan otomatis masuk setelah pembayaran terdeteksi._\n` +
+            `ID: \`${payment.transactionId}\``;
 
         await ctx.api.deleteMessage(ctx.chat.id, msg.message_id).catch(() => { });
-        await ctx.replyWithPhoto({ source: qrBuffer }, {
-            caption:
-                `🧾 *QRIS PAYMENT*\n━━━━━━━━━━━━━━━━━━━━\n\n` +
-                `💎 Kredit: *${creditsToBuy}x*\n` +
-                `💵 Total Bayar: *Rp ${totalFormatted}*\n` +
-                `  _(Nominal unik: ${payment.amountUnique} — transfer tepat segini)_\n\n` +
-                `⏰ Expired: *${expiresStr}*\n\n` +
-                `📸 Scan QRIS di atas menggunakan aplikasi bank/e-wallet apapun.\n\n` +
-                `_Kredit akan otomatis masuk setelah pembayaran terdeteksi._\n` +
-                `ID: \`${payment.transactionId}\``,
-            parse_mode: 'Markdown',
-        });
+
+        // Try generating QR image, fallback to text QRIS
+        try {
+            const { InputFile } = require('grammy');
+            const qr = require('qrcode');
+            const qrBuffer = await qr.toBuffer(payment.qrisContent, { type: 'png', width: 400 });
+            await ctx.replyWithPhoto(new InputFile(qrBuffer, 'qris.png'), {
+                caption,
+                parse_mode: 'Markdown',
+            });
+        } catch (qrErr) {
+            console.error('[Buy] QR generation failed, sending text fallback:', qrErr.message);
+            await ctx.reply(
+                caption + `\n\n📋 *QRIS String (copy ke app):*\n\`${payment.qrisContent}\``,
+                { parse_mode: 'Markdown' }
+            );
+        }
 
         // Poll for payment for 15 minutes
         startPaymentPoller(ctx, telegramId, payment.transactionId, creditsToBuy);
