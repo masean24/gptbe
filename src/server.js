@@ -138,19 +138,8 @@ app.post('/api/web/pay', async (req, res) => {
     if (!account) return res.status(503).json({ error: 'Semua akun sedang penuh. Coba lagi nanti.' });
 
     try {
-        // Create payment with email as identifier (1 credit = 1 invite)
+        // createPayment already creates a Transaction internally, so don't create another
         const payment = await createPayment(`web_${targetEmail}`, 1);
-
-        // Store email in a pending web order (we'll use Transaction with status pending)
-        await Transaction.create({
-            telegramId: `web_${targetEmail}`,
-            type: 'qris',
-            credits: 1,
-            amount: payment.amountTotal,
-            qrisTransactionId: payment.transactionId,
-            qrisStatus: 'pending',
-            description: `QRIS bayar invite ${targetEmail}`,
-        });
 
         await notifyNewWebOrder(targetEmail, `QRIS Rp ${payment.amountTotal.toLocaleString('id-ID')}`);
 
@@ -164,7 +153,8 @@ app.post('/api/web/pay', async (req, res) => {
             email: targetEmail,
         });
     } catch (err) {
-        res.status(500).json({ error: 'Gagal membuat QRIS: ' + err.message });
+        console.error('[Web Pay] QRIS error:', err.response?.data || err.message);
+        res.status(500).json({ error: 'Gagal membuat QRIS: ' + (err.response?.data?.message || err.message) });
     }
 });
 
@@ -178,6 +168,24 @@ app.get('/api/web/pay/status/:transactionId', async (req, res) => {
     if (!txn) return res.status(404).json({ error: 'Transaksi tidak ditemukan' });
 
     res.json({ status: txn.qrisStatus, email: txn.telegramId.replace('web_', '') });
+});
+
+// =========================================================
+// PUBLIC: Check invite job status (for web polling)
+// =========================================================
+app.get('/api/web/job/:jobId', async (req, res) => {
+    const { jobId } = req.params;
+    try {
+        const job = await InviteJob.findById(jobId);
+        if (!job) return res.status(404).json({ error: 'Job tidak ditemukan' });
+        res.json({
+            status: job.status,
+            result: job.result,
+            email: job.targetEmail,
+        });
+    } catch {
+        res.status(400).json({ error: 'Invalid job ID' });
+    }
 });
 
 // =========================================================

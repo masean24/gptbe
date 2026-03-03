@@ -64,9 +64,8 @@ async function main() {
     // Launch visible browser
     console.log('🌐 Launching browser (VISIBLE mode)...');
     const browser = await chromium.launch({
-        headless: false,
+        headless: true,
         args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
-        slowMo: 500, // Perlambat supaya bisa dilihat
     });
 
     const context = await browser.newContext({
@@ -101,7 +100,7 @@ async function main() {
         const title = await page.title();
         console.log(`   Title: ${title}`);
 
-        await pause('Lihat browser. Tekan ENTER untuk buka sidebar & cari invite button...');
+
 
         // ============ Step 2: Open sidebar & find invite button ============
         console.log('\n📍 Step 2: Opening sidebar...');
@@ -125,10 +124,14 @@ async function main() {
             await page.waitForTimeout(3000);
         } else {
             console.log('   ❌ Not found.');
-            await pause('Coba klik manual "Invite team members" di browser, lalu tekan ENTER...');
+            console.log('   ❌ GAGAL: Invite button tidak ditemukan.');
+            await browser.close();
+            await mongoose.disconnect();
+            rl.close();
+            process.exit(1);
         }
 
-        await pause('Popup muncul? Tekan ENTER untuk step 3 (fill email)...');
+
 
         // ============ Step 3: Fill email ============
         console.log(`\n📍 Step 3: Filling email: ${TARGET_EMAIL}`);
@@ -147,10 +150,10 @@ async function main() {
                 name: el.name,
             })));
             console.log('   All inputs:', JSON.stringify(allInputs, null, 2));
-            await pause('Isi email manual di browser, lalu tekan ENTER...');
+
         }
 
-        await pause('Email terisi? Tekan ENTER untuk step 4 (click Next)...');
+
 
         // ============ Step 4: Click Next ============
         console.log('\n📍 Step 4: Clicking "Next"...');
@@ -161,10 +164,10 @@ async function main() {
             await page.waitForTimeout(3000);
         } else {
             console.log('   ❌ Next button not found!');
-            await pause('Klik Next manual, lalu tekan ENTER...');
+
         }
 
-        await pause('Konfirmasi muncul? Tekan ENTER untuk step 5 (Send invites)...');
+
 
         // ============ Step 5: Click Send invites ============
         console.log('\n📍 Step 5: Clicking "Send invites"...');
@@ -174,7 +177,7 @@ async function main() {
             console.log('   ✅ Send invites clicked!');
         } else {
             console.log('   ❌ Send invites button not found!');
-            await pause('Klik Send invites manual, lalu tekan ENTER...');
+
         }
 
         // ============ Step 6: Wait for toast ============
@@ -197,10 +200,10 @@ async function main() {
 
         console.log('\n🏁 RESULT:', success ? '✅ BERHASIL' : '❌ GAGAL');
 
-        await pause('Selesai! Tekan ENTER untuk close browser...');
+
     } catch (error) {
         console.error('\n❌ ERROR:', error.message);
-        await pause('Error terjadi. Cek browser. Tekan ENTER untuk close...');
+
     }
 
     await browser.close();

@@ -24,12 +24,19 @@ const qrisClient = axios.create({
  */
 async function createPayment(telegramId, creditsToBuy) {
     const amount = creditsToBuy * CREDIT_PRICE;
-    const orderId = `GPTI-${telegramId}-${Date.now()}`;
+    // Clean order_id — no special chars that might break the API
+    const cleanId = telegramId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const orderId = `GPTI-${cleanId}-${Date.now()}`;
+
+    // customer_id must be short and clean for the QRIS API
+    const customerId = telegramId.startsWith('web_')
+        ? `web_${Date.now()}`
+        : `tg_${telegramId}`;
 
     const response = await qrisClient.post('/create-transaction', {
         amount,
         order_id: orderId,
-        customer_id: `telegram_${telegramId}`,
+        customer_id: customerId,
     });
 
     const data = response.data;
@@ -73,19 +80,15 @@ async function checkPayment(qrisTransactionId) {
  * - Updates transaction status
  */
 async function handleWebhookPayload(payload) {
-    const { customer_id, order_id, amount, status } = payload;
+    const { order_id, status } = payload;
 
     if (status !== 'completed') return { matched: false };
+    if (!order_id) return { matched: false };
 
-    // Extract telegram ID from customer_id: "telegram_<id>"
-    const telegramId = customer_id?.replace('telegram_', '');
-    if (!telegramId) return { matched: false };
-
-    // Find the pending transaction
+    // Find the pending transaction by order_id
     const txn = await Transaction.findOne({
         qrisOrderId: order_id,
         qrisStatus: 'pending',
-        telegramId,
     });
 
     if (!txn) return { matched: false };
@@ -93,22 +96,29 @@ async function handleWebhookPayload(payload) {
     // Already processed guard
     if (txn.qrisStatus === 'paid') return { matched: true, alreadyProcessed: true };
 
+    const telegramId = txn.telegramId;
+
     // Update transaction
     txn.qrisStatus = 'paid';
     await txn.save();
 
-    // Add credits to user
-    const user = await User.findOneAndUpdate(
-        { telegramId },
-        { $inc: { credits: txn.credits } },
-        { new: true, upsert: true }
-    );
+    // Add credits to user (skip for web orders - they get auto-invite instead)
+    let newBalance = 0;
+    if (!telegramId.startsWith('web_')) {
+        const user = await User.findOneAndUpdate(
+            { telegramId },
+            { $inc: { credits: txn.credits } },
+            { new: true, upsert: true }
+        );
+        newBalance = user.credits;
+    }
 
     return {
         matched: true,
         telegramId,
         creditsAdded: txn.credits,
-        newBalance: user.credits,
+        newBalance,
+        amount: txn.amount,
         transactionId: txn.qrisTransactionId,
     };
 }

@@ -144,7 +144,7 @@ async function inviteTeamMember(account, targetEmail) {
         // ============ Step 1: Navigate to chatgpt.com ============
         console.log('[Playwright] Step 1: Navigating to chatgpt.com...');
         await page.goto('https://chatgpt.com/', {
-            waitUntil: 'domcontentloaded',
+            waitUntil: 'networkidle',
             timeout: 60000,
         });
         await page.waitForTimeout(5000);
@@ -186,26 +186,42 @@ async function inviteTeamMember(account, targetEmail) {
 
         await inviteBtn.first().click();
         console.log('[Playwright] "Invite team members" button clicked');
-        await page.waitForTimeout(3000);
+        await page.waitForTimeout(5000);
 
-        // ============ Step 3: Fill email in first input ============
+        // ============ Step 3: Fill email in first input (with retry) ============
         console.log(`[Playwright] Step 3: Filling email ${targetEmail}...`);
-        const emailInputs = page.locator('input[placeholder="Email"]');
-        const emailInputCount = await emailInputs.count();
-        console.log(`[Playwright] Email inputs found: ${emailInputCount}`);
 
-        if (emailInputCount === 0) {
-            const altInput = page.locator('input[type="email"], input[placeholder*="email" i]');
-            const altCount = await altInput.count();
-            if (altCount === 0) {
-                await sendScreenshotToAdmin(page, '3_no_email_input');
-                await browser.close();
-                browserInstance = null;
-                return { success: false, message: 'Input email tidak ditemukan di popup invite.' };
+        // Retry loop — popup may take time to appear on slower servers
+        let emailFilled = false;
+        for (let attempt = 0; attempt < 10; attempt++) {
+            const emailInputs = page.locator('input[placeholder="Email"]');
+            const emailInputCount = await emailInputs.count();
+
+            if (emailInputCount > 0) {
+                await emailInputs.first().fill(targetEmail);
+                console.log(`[Playwright] Email filled: ${targetEmail} (attempt ${attempt + 1})`);
+                emailFilled = true;
+                break;
             }
-            await altInput.first().fill(targetEmail);
-        } else {
-            await emailInputs.first().fill(targetEmail);
+
+            // Fallback selectors
+            const altInput = page.locator('input[type="email"], input[placeholder*="email" i]');
+            if ((await altInput.count()) > 0) {
+                await altInput.first().fill(targetEmail);
+                console.log(`[Playwright] Email filled via alt selector (attempt ${attempt + 1})`);
+                emailFilled = true;
+                break;
+            }
+
+            console.log(`[Playwright] Email input not found yet, retrying... (${attempt + 1}/10)`);
+            await page.waitForTimeout(1000);
+        }
+
+        if (!emailFilled) {
+            await sendScreenshotToAdmin(page, 'no_email_input');
+            await browser.close();
+            browserInstance = null;
+            return { success: false, message: 'Input email tidak ditemukan di popup invite.' };
         }
 
         console.log(`[Playwright] Email filled: ${targetEmail}`);
