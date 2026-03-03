@@ -15,7 +15,7 @@ const ADMIN_IDS = (process.env.ADMIN_IDS || '').split(',').map(id => id.trim()).
 async function sendScreenshotToAdmin(page, label) {
     const path = `/tmp/invite_${label}.png`;
     try {
-        await page.screenshot({ path });
+        await page.screenshot({ path, fullPage: true });
         console.log(`[Playwright] Screenshot saved: ${path}`);
         // Send to admin via Telegram
         if (ADMIN_IDS.length > 0) {
@@ -131,7 +131,7 @@ async function inviteTeamMember(account, targetEmail) {
     if (account.sessionData) {
         context = await browser.newContext({
             storageState: JSON.parse(account.sessionData),
-            viewport: { width: 1280, height: 720 },
+            viewport: { width: 1920, height: 1080 },
             userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         });
     } else {
@@ -168,10 +168,27 @@ async function inviteTeamMember(account, targetEmail) {
         console.log(`[Playwright] "Invite team members" buttons found: ${inviteBtnCount}`);
 
         if (inviteBtnCount === 0) {
-            await sendScreenshotToAdmin(page, '2_no_invite_btn');
-            await browser.close();
-            browserInstance = null;
-            return { success: false, message: 'Tombol "Invite team members" tidak ditemukan di sidebar.' };
+            // Try toggling sidebar open first
+            console.log('[Playwright] Button not found, trying to open sidebar...');
+            const sidebarToggle = page.locator('button[aria-label*="Sidebar" i], button[aria-label*="sidebar" i], nav button').first();
+            if ((await sidebarToggle.count()) > 0) {
+                await sidebarToggle.click();
+                await page.waitForTimeout(2000);
+                const retryCount = await inviteBtn.count();
+                if (retryCount > 0) {
+                    console.log('[Playwright] Found invite button after opening sidebar');
+                } else {
+                    await sendScreenshotToAdmin(page, 'no_invite_btn');
+                    await browser.close();
+                    browserInstance = null;
+                    return { success: false, message: 'Tombol "Invite team members" tidak ditemukan di sidebar.' };
+                }
+            } else {
+                await sendScreenshotToAdmin(page, 'no_invite_btn');
+                await browser.close();
+                browserInstance = null;
+                return { success: false, message: 'Tombol "Invite team members" tidak ditemukan di sidebar.' };
+            }
         }
 
         await inviteBtn.first().click();
@@ -242,13 +259,14 @@ async function inviteTeamMember(account, targetEmail) {
             }
         }
 
-        await browser.close();
-        browserInstance = null;
-
         if (success) {
+            await browser.close();
+            browserInstance = null;
             return { success: true, message: `Invite berhasil dikirim ke ${targetEmail}` };
         } else {
             await sendScreenshotToAdmin(page, 'no_confirmation');
+            await browser.close();
+            browserInstance = null;
             return { success: false, message: `Tidak ada konfirmasi invite untuk ${targetEmail}. Cek screenshot.` };
         }
 
