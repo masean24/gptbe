@@ -180,6 +180,7 @@ bot.command('beli', async (ctx) => {
 bot.callbackQuery(/^buy_(\d+)$/, async (ctx) => {
     const creditsToBuy = parseInt(ctx.match[1]);
     const telegramId = String(ctx.from.id);
+    const chatId = ctx.chat.id;
 
     await ctx.answerCallbackQuery();
     const msg = await ctx.reply('⏳ Membuat QRIS payment...');
@@ -200,44 +201,59 @@ bot.callbackQuery(/^buy_(\d+)$/, async (ctx) => {
             `_Kredit akan otomatis masuk setelah pembayaran terdeteksi._\n` +
             `ID: \`${payment.transactionId}\``;
 
-        await ctx.api.deleteMessage(ctx.chat.id, msg.message_id).catch(() => { });
+        await ctx.api.deleteMessage(chatId, msg.message_id).catch(() => { });
 
         // Try generating QR image, fallback to text QRIS
+        let qrisMessageId = null;
         try {
             const { InputFile } = require('grammy');
             const qr = require('qrcode');
             const qrBuffer = await qr.toBuffer(payment.qrisContent, { type: 'png', width: 400 });
-            await ctx.replyWithPhoto(new InputFile(qrBuffer, 'qris.png'), {
+            const qrisMsg = await ctx.replyWithPhoto(new InputFile(qrBuffer, 'qris.png'), {
                 caption,
                 parse_mode: 'Markdown',
             });
+            qrisMessageId = qrisMsg.message_id;
         } catch (qrErr) {
             console.error('[Buy] QR generation failed, sending text fallback:', qrErr.message);
-            await ctx.reply(
+            const qrisMsg = await ctx.reply(
                 caption + `\n\n📋 *QRIS String (copy ke app):*\n\`${payment.qrisContent}\``,
                 { parse_mode: 'Markdown' }
             );
+            qrisMessageId = qrisMsg.message_id;
         }
 
         // Poll for payment for 15 minutes
-        startPaymentPoller(ctx, telegramId, payment.transactionId, creditsToBuy);
+        startPaymentPoller(chatId, telegramId, payment.transactionId, creditsToBuy, qrisMessageId);
     } catch (err) {
         console.error('[Buy] Error creating payment:', err.message);
-        await ctx.api.editMessageText(ctx.chat.id, msg.message_id, '❌ Gagal membuat QRIS. Coba lagi nanti.');
+        await ctx.api.editMessageText(chatId, msg.message_id, '❌ Gagal membuat QRIS. Coba lagi nanti.');
     }
 });
 
-async function startPaymentPoller(ctx, telegramId, transactionId, credits) {
+async function startPaymentPoller(chatId, telegramId, transactionId, credits, qrisMessageId) {
     const maxAttempts = 90; // 15 minutes (10s interval)
     let attempt = 0;
 
+    const deleteQris = async () => {
+        if (qrisMessageId) {
+            await bot.api.deleteMessage(chatId, qrisMessageId).catch(() => { });
+        }
+    };
+
     const poll = async () => {
-        if (attempt >= maxAttempts) return;
+        if (attempt >= maxAttempts) {
+            // Expired — delete QRIS message
+            await deleteQris();
+            await bot.api.sendMessage(telegramId, '⚠️ QRIS kamu sudah expired. Silakan /beli lagi untuk membuat QRIS baru.').catch(() => { });
+            return;
+        }
         attempt++;
         try {
             const txn = await checkPayment(transactionId);
             if (txn?.status === 'paid') {
-                // Credits are added via webhook; send notification
+                // Delete QRIS message & send success
+                await deleteQris();
                 await bot.api.sendMessage(telegramId,
                     `✅ *Pembayaran Diterima!*\n\n` +
                     `💎 ${credits} kredit berhasil ditambahkan ke akun kamu.\n\n` +
@@ -247,6 +263,7 @@ async function startPaymentPoller(ctx, telegramId, transactionId, credits) {
                 return;
             }
             if (txn?.status === 'expired') {
+                await deleteQris();
                 await bot.api.sendMessage(telegramId, '⚠️ QRIS kamu sudah expired. Silakan /beli lagi untuk membuat QRIS baru.');
                 return;
             }
@@ -257,6 +274,7 @@ async function startPaymentPoller(ctx, telegramId, transactionId, credits) {
 
     setTimeout(poll, 10000);
 }
+
 
 // =========================================================
 // /redeem - Redeem a code
