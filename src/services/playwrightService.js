@@ -161,34 +161,27 @@ async function inviteTeamMember(account, targetEmail) {
 
 
 
-        // ============ Step 2: Click "Invite team members" button ============
-        console.log('[Playwright] Step 2: Looking for "Invite team members" button...');
+        // ============ Step 2: Open sidebar & click "Invite team members" ============
+        console.log('[Playwright] Step 2: Opening sidebar...');
+        const openSidebarBtn = page.locator('button[aria-label="Open sidebar"]');
+        if ((await openSidebarBtn.count()) > 0) {
+            await openSidebarBtn.click();
+            console.log('[Playwright] Sidebar opened');
+            await page.waitForTimeout(2000);
+        } else {
+            console.log('[Playwright] Sidebar already open or toggle not found');
+        }
+
+        console.log('[Playwright] Looking for "Invite team members" button...');
         const inviteBtn = page.locator('button:has-text("Invite team members")');
         const inviteBtnCount = await inviteBtn.count();
         console.log(`[Playwright] "Invite team members" buttons found: ${inviteBtnCount}`);
 
         if (inviteBtnCount === 0) {
-            // Try toggling sidebar open first
-            console.log('[Playwright] Button not found, trying to open sidebar...');
-            const sidebarToggle = page.locator('button[aria-label*="Sidebar" i], button[aria-label*="sidebar" i], nav button').first();
-            if ((await sidebarToggle.count()) > 0) {
-                await sidebarToggle.click();
-                await page.waitForTimeout(2000);
-                const retryCount = await inviteBtn.count();
-                if (retryCount > 0) {
-                    console.log('[Playwright] Found invite button after opening sidebar');
-                } else {
-                    await sendScreenshotToAdmin(page, 'no_invite_btn');
-                    await browser.close();
-                    browserInstance = null;
-                    return { success: false, message: 'Tombol "Invite team members" tidak ditemukan di sidebar.' };
-                }
-            } else {
-                await sendScreenshotToAdmin(page, 'no_invite_btn');
-                await browser.close();
-                browserInstance = null;
-                return { success: false, message: 'Tombol "Invite team members" tidak ditemukan di sidebar.' };
-            }
+            await sendScreenshotToAdmin(page, 'no_invite_btn');
+            await browser.close();
+            browserInstance = null;
+            return { success: false, message: 'Tombol "Invite team members" tidak ditemukan di sidebar.' };
         }
 
         await inviteBtn.first().click();
