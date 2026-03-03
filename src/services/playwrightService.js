@@ -115,6 +115,14 @@ async function loginAccount(account) {
 
 /**
  * Invite a team member to ChatGPT Team workspace
+ *
+ * Flow (as of 2026-03):
+ * 1. Go to chatgpt.com (main page, not admin)
+ * 2. Click "Invite team members" button in bottom-left sidebar
+ * 3. Popup with 5 email inputs appears ("Invite members to ... workspace")
+ * 4. Fill first email input, click "Next"
+ * 5. Confirm page shows email + role, click "Send invites"
+ * 6. Wait for green toast "Invited 1 user to ..."
  */
 async function inviteTeamMember(account, targetEmail) {
     const browser = await launchBrowser();
@@ -133,185 +141,117 @@ async function inviteTeamMember(account, targetEmail) {
     const page = await context.newPage();
 
     try {
-        // Step 1: Navigate to team admin page
-        console.log(`[Playwright] Step 1: Navigating to admin members page...`);
-        await page.goto('https://chatgpt.com/admin/organization/members', {
+        // ============ Step 1: Navigate to chatgpt.com ============
+        console.log('[Playwright] Step 1: Navigating to chatgpt.com...');
+        await page.goto('https://chatgpt.com/', {
             waitUntil: 'domcontentloaded',
             timeout: 60000,
         });
         await page.waitForTimeout(5000);
 
         const currentUrl = page.url();
-        console.log(`[Playwright] Current URL after navigation: ${currentUrl}`);
+        console.log(`[Playwright] Current URL: ${currentUrl}`);
 
-        // Check for session expiry
         if (currentUrl.includes('auth') || currentUrl.includes('login')) {
             await sendScreenshotToAdmin(page, 'session_expired');
-            console.log('[Playwright] Session expired - redirected to auth');
             await browser.close();
             browserInstance = null;
             return { success: false, message: 'Session expired. Silakan login ulang akun via /loginaccount' };
         }
 
-        // Step 2: Log page state for debugging
-        const pageTitle = await page.title();
-        console.log(`[Playwright] Page title: ${pageTitle}`);
 
-        await sendScreenshotToAdmin(page, 'page_loaded');
 
-        // Log all buttons on page for debugging
-        const buttons = await page.$$eval('button', els => els.map(el => ({
-            text: el.textContent?.trim()?.substring(0, 50),
-            class: el.className?.substring(0, 50),
-            disabled: el.disabled,
-        })));
-        console.log(`[Playwright] Buttons found on page:`, JSON.stringify(buttons, null, 2));
+        // ============ Step 2: Click "Invite team members" button ============
+        console.log('[Playwright] Step 2: Looking for "Invite team members" button...');
+        const inviteBtn = page.locator('button:has-text("Invite team members")');
+        const inviteBtnCount = await inviteBtn.count();
+        console.log(`[Playwright] "Invite team members" buttons found: ${inviteBtnCount}`);
 
-        // Also log all links
-        const links = await page.$$eval('a', els => els.map(el => ({
-            text: el.textContent?.trim()?.substring(0, 50),
-            href: el.href,
-        })));
-        console.log(`[Playwright] Links found on page:`, JSON.stringify(links.slice(0, 20), null, 2));
-
-        // Step 3: Handle workspace onboarding if needed
-        const onboardingExists = await page.locator('button:has-text("Skip"), button:has-text("Continue")').count() > 0;
-        if (onboardingExists) {
-            console.log('[Playwright] Onboarding detected, clicking Skip/Continue...');
-            await page.click('button:has-text("Skip"), button:has-text("Continue")');
-            await page.waitForTimeout(2000);
-        }
-
-        // Step 4: Try to find the Invite button with multiple selectors
-        console.log('[Playwright] Step 4: Looking for invite button...');
-        const inviteSelectors = [
-            'button:has-text("Invite")',
-            'button:has-text("Add member")',
-            'button:has-text("Add people")',
-            'button:has-text("Undang")',
-            'a:has-text("Invite")',
-            'a:has-text("Add member")',
-            'a:has-text("Add people")',
-            '[data-testid*="invite"]',
-            '[aria-label*="invite" i]',
-            '[aria-label*="add member" i]',
-        ];
-
-        let inviteButton = null;
-        for (const selector of inviteSelectors) {
-            const count = await page.locator(selector).count();
-            if (count > 0) {
-                console.log(`[Playwright] Found invite button with selector: ${selector}`);
-                inviteButton = page.locator(selector).first();
-                break;
-            }
-        }
-
-        if (!inviteButton) {
-            await sendScreenshotToAdmin(page, 'no_button_found');
-            // Dump page HTML for analysis
-            const bodyHtml = await page.$eval('body', el => el.innerHTML.substring(0, 5000));
-            console.log(`[Playwright] Page body HTML (first 5000 chars):\n${bodyHtml}`);
-
+        if (inviteBtnCount === 0) {
+            await sendScreenshotToAdmin(page, '2_no_invite_btn');
             await browser.close();
             browserInstance = null;
-            return { success: false, message: 'Tombol invite tidak ditemukan. UI ChatGPT mungkin sudah berubah. Screenshot dikirim ke admin.' };
+            return { success: false, message: 'Tombol "Invite team members" tidak ditemukan di sidebar.' };
         }
 
-        await inviteButton.click();
-        console.log('[Playwright] Invite button clicked');
-        await page.waitForTimeout(2000);
-        await sendScreenshotToAdmin(page, 'after_invite_click');
+        await inviteBtn.first().click();
+        console.log('[Playwright] "Invite team members" button clicked');
+        await page.waitForTimeout(3000);
 
-        // Step 5: Fill in email
-        console.log(`[Playwright] Step 5: Looking for email input for ${targetEmail}...`);
-        const emailSelectors = [
-            'input[type="email"]',
-            'input[placeholder*="email" i]',
-            'input[placeholder*="Email"]',
-            'input[name*="email" i]',
-            'input[aria-label*="email" i]',
-        ];
+        // ============ Step 3: Fill email in first input ============
+        console.log(`[Playwright] Step 3: Filling email ${targetEmail}...`);
+        const emailInputs = page.locator('input[placeholder="Email"]');
+        const emailInputCount = await emailInputs.count();
+        console.log(`[Playwright] Email inputs found: ${emailInputCount}`);
 
-        let emailInput = null;
-        for (const selector of emailSelectors) {
-            const count = await page.locator(selector).count();
-            if (count > 0) {
-                console.log(`[Playwright] Found email input with selector: ${selector}`);
-                emailInput = page.locator(selector).first();
-                break;
+        if (emailInputCount === 0) {
+            const altInput = page.locator('input[type="email"], input[placeholder*="email" i]');
+            const altCount = await altInput.count();
+            if (altCount === 0) {
+                await sendScreenshotToAdmin(page, '3_no_email_input');
+                await browser.close();
+                browserInstance = null;
+                return { success: false, message: 'Input email tidak ditemukan di popup invite.' };
             }
+            await altInput.first().fill(targetEmail);
+        } else {
+            await emailInputs.first().fill(targetEmail);
         }
 
-        if (!emailInput) {
-            await sendScreenshotToAdmin(page, 'no_email_input');
-            await browser.close();
-            browserInstance = null;
-            return { success: false, message: 'Input email tidak ditemukan setelah klik invite.' };
-        }
-
-        await emailInput.fill(targetEmail);
         console.log(`[Playwright] Email filled: ${targetEmail}`);
         await page.waitForTimeout(1000);
 
-        // Step 6: Submit invite
-        console.log('[Playwright] Step 6: Looking for submit button...');
-        const submitSelectors = [
-            'button[type="submit"]',
-            'button:has-text("Send invite")',
-            'button:has-text("Send")',
-            'button:has-text("Invite")',
-            'button:has-text("Kirim")',
-            'button:has-text("Add")',
-        ];
 
-        let submitBtn = null;
-        for (const selector of submitSelectors) {
-            const count = await page.locator(selector).count();
-            if (count > 0) {
-                const btn = page.locator(selector).first();
-                const isDisabled = await btn.isDisabled().catch(() => false);
-                if (!isDisabled) {
-                    console.log(`[Playwright] Found submit button with selector: ${selector}`);
-                    submitBtn = btn;
-                    break;
-                }
-            }
-        }
-
-        if (!submitBtn) {
-            await sendScreenshotToAdmin(page, 'no_submit_btn');
+        // ============ Step 4: Click "Next" ============
+        console.log('[Playwright] Step 4: Clicking "Next"...');
+        const nextBtn = page.locator('button:has-text("Next")');
+        if ((await nextBtn.count()) === 0) {
+            await sendScreenshotToAdmin(page, '4_no_next_btn');
             await browser.close();
             browserInstance = null;
-            return { success: false, message: 'Tombol submit invite tidak ditemukan.' };
+            return { success: false, message: 'Tombol "Next" tidak ditemukan.' };
         }
 
-        await submitBtn.click();
-        console.log('[Playwright] Submit button clicked');
+        await nextBtn.first().click();
+        console.log('[Playwright] "Next" clicked');
         await page.waitForTimeout(3000);
-        await sendScreenshotToAdmin(page, 'after_submit');
 
-        // Step 7: Check result
-        console.log('[Playwright] Step 7: Checking result...');
-        const pageText = await page.textContent('body');
-        console.log(`[Playwright] Page text after submit (first 1000 chars): ${pageText?.substring(0, 1000)}`);
+        // ============ Step 5: Click "Send invites" ============
+        console.log('[Playwright] Step 5: Clicking "Send invites"...');
+        const sendBtn = page.locator('button:has-text("Send invites"), button:has-text("Send invite")');
+        if ((await sendBtn.count()) === 0) {
+            await sendScreenshotToAdmin(page, '5_no_send_btn');
+            await browser.close();
+            browserInstance = null;
+            return { success: false, message: 'Tombol "Send invites" tidak ditemukan.' };
+        }
 
-        const successPatterns = ['invited', 'berhasil', 'sent', 'success', 'pending'];
-        const errorPatterns = ['already', 'sudah', 'error', 'gagal', 'failed', 'invalid'];
+        await sendBtn.first().click();
+        console.log('[Playwright] "Send invites" clicked');
 
-        const lowerText = pageText?.toLowerCase() || '';
-
-        for (const pattern of errorPatterns) {
-            if (lowerText.includes(pattern)) {
-                await browser.close();
-                browserInstance = null;
-                return { success: false, message: `${targetEmail} sudah pernah diinvite atau email tidak valid.` };
+        // ============ Step 6: Wait for green toast ============
+        console.log('[Playwright] Step 6: Waiting for success toast...');
+        let success = false;
+        for (let i = 0; i < 20; i++) {
+            await page.waitForTimeout(1000);
+            const pageText = (await page.textContent('body'))?.toLowerCase() || '';
+            if (pageText.includes('invited') && pageText.includes('user')) {
+                console.log('[Playwright] Success toast detected!');
+                success = true;
+                break;
             }
         }
 
         await browser.close();
         browserInstance = null;
-        return { success: true, message: `Invite berhasil dikirim ke ${targetEmail}` };
+
+        if (success) {
+            return { success: true, message: `Invite berhasil dikirim ke ${targetEmail}` };
+        } else {
+            await sendScreenshotToAdmin(page, 'no_confirmation');
+            return { success: false, message: `Tidak ada konfirmasi invite untuk ${targetEmail}. Cek screenshot.` };
+        }
+
     } catch (error) {
         console.error(`[Playwright] Error during invite:`, error.message);
         try { await sendScreenshotToAdmin(page, 'error'); } catch (_) { }
