@@ -2,8 +2,35 @@ const InviteJob = require('../models/InviteJob');
 const Account = require('../models/Account');
 const User = require('../models/User');
 const Transaction = require('../models/Transaction');
+const RedeemCode = require('../models/RedeemCode');
 const { inviteTeamMember } = require('./playwrightService');
-const { notifyInviteSuccess, notifyInviteFailed } = require('./notifyService');
+const { notifyInviteFailed, notifyInviteSuccess } = require('./notifyService');
+
+/**
+ * If a web order used a redeem code and the invite failed,
+ * un-redeem the code so the user can try again.
+ */
+async function refundWebRedeem(telegramId) {
+    if (!telegramId.startsWith('web_')) return;
+
+    const redeemTxn = await Transaction.findOne({
+        telegramId,
+        type: 'redeem',
+    }).sort({ createdAt: -1 });
+
+    if (!redeemTxn || !redeemTxn.redeemCode) return;
+
+    const code = await RedeemCode.findOne({ code: redeemTxn.redeemCode });
+    if (code && code.isUsed) {
+        code.isUsed = false;
+        code.usedBy = null;
+        code.usedAt = null;
+        await code.save();
+        console.log(`[Queue] Refunded redeem code ${code.code} for failed web invite`);
+    }
+
+    await redeemTxn.deleteOne();
+}
 
 let isProcessing = false;
 
@@ -54,6 +81,7 @@ async function processQueue() {
                 await job.save();
                 await notifyInviteFailed(job.targetEmail, err.message);
                 await notifyUser(job.telegramId, job.targetEmail, err.message);
+                await refundWebRedeem(job.telegramId);
             }
         }
     } finally {
@@ -143,6 +171,7 @@ async function processJob(job) {
         await job.save();
         await notifyInviteFailed(targetEmail, result.message);
         await notifyUser(telegramId, targetEmail, result.message);
+        await refundWebRedeem(telegramId);
     }
 }
 
