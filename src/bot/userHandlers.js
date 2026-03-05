@@ -150,19 +150,21 @@ bot.command(['menu', 'help'], async (ctx) => {
     if (!(await forceJoinCheck(ctx))) return;
 
     const admin = isAdmin(ctx);
-    let text = `📋 *MENU UTAMA*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
-    text += `🎯 *Invite*\n`;
-    text += `• /gpti \`email@example.com\` — Invite email ke ChatGPT Plus\n\n`;
-    text += `💰 *Kredit*\n`;
-    text += `• /beli — Beli kredit via QRIS\n`;
-    text += `• /redeem \`KODE\` — Tukar Redeem Code\n\n`;
-    text += `📊 *Info*\n`;
-    text += `• /status — Cek saldo & informasi kamu\n`;
-    text += `• /riwayat — Riwayat transaksi\n\n`;
+    let text =
+        `📋 *MENU — HubifyGPT Bot*\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n\n` +
+        `🎯 *Invite ChatGPT Plus*\n` +
+        `  /gpti \`email@kamu.com\`\n\n` +
+        `💰 *Kredit*\n` +
+        `  /beli — Beli kredit via QRIS\n` +
+        `  /redeem \`KODE\` — Tukar Redeem Code\n\n` +
+        `📊 *Akun*\n` +
+        `  /status — Saldo & info kamu\n` +
+        `  /riwayat — Riwayat transaksi\n` +
+        `━━━━━━━━━━━━━━━━━━━━`;
 
     if (admin) {
-        text += `\n👑 *Admin Panel*\n`;
-        text += `• /admin — Buka panel admin\n`;
+        text += `\n\n👑 *Admin*\n  /admin — Panel admin`;
     }
 
     await ctx.reply(text, { parse_mode: 'Markdown' });
@@ -174,19 +176,21 @@ bot.callbackQuery('user_menu', async (ctx) => {
     if (!(await forceJoinCheck(ctx))) return;
 
     const admin = isAdmin(ctx);
-    let text = `📋 *MENU UTAMA*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
-    text += `🎯 *Invite*\n`;
-    text += `• /gpti \`email@example.com\` — Invite email ke ChatGPT Plus\n\n`;
-    text += `💰 *Kredit*\n`;
-    text += `• /beli — Beli kredit via QRIS\n`;
-    text += `• /redeem \`KODE\` — Tukar Redeem Code\n\n`;
-    text += `📊 *Info*\n`;
-    text += `• /status — Cek saldo & informasi kamu\n`;
-    text += `• /riwayat — Riwayat transaksi\n\n`;
+    let text =
+        `📋 *MENU — HubifyGPT Bot*\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n\n` +
+        `🎯 *Invite ChatGPT Plus*\n` +
+        `  /gpti \`email@kamu.com\`\n\n` +
+        `💰 *Kredit*\n` +
+        `  /beli — Beli kredit via QRIS\n` +
+        `  /redeem \`KODE\` — Tukar Redeem Code\n\n` +
+        `📊 *Akun*\n` +
+        `  /status — Saldo & info kamu\n` +
+        `  /riwayat — Riwayat transaksi\n` +
+        `━━━━━━━━━━━━━━━━━━━━`;
 
     if (admin) {
-        text += `\n👑 *Admin Panel*\n`;
-        text += `• /admin — Buka panel admin\n`;
+        text += `\n\n👑 *Admin*\n  /admin — Panel admin`;
     }
 
     await ctx.reply(text, { parse_mode: 'Markdown' });
@@ -207,15 +211,17 @@ bot.command('status', async (ctx) => {
     const activeAccounts = accountStats.find(s => s._id === 'active')?.count || 0;
 
     await ctx.reply(
-        `📊 *STATUS KAMU*\n━━━━━━━━━━━━━━━━━━━━\n\n` +
-        `👤 Username: @${user.username || '-'}\n` +
-        `🆔 Telegram ID: \`${user.telegramId}\`\n\n` +
-        `💎 *Saldo Kredit: ${user.credits}*\n` +
-        `📧 Total Invite: ${user.totalInvites}\n\n` +
+        `📊 *STATUS KAMU*\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n\n` +
+        `👤 *${user.firstName || user.username || 'User'}*` +
+        `${user.username ? ` (@${user.username})` : ''}\n` +
+        `🆔 ID: \`${user.telegramId}\`\n\n` +
+        `💎 Saldo Kredit : *${user.credits}*\n` +
+        `📧 Total Invite  : *${user.totalInvites}*\n\n` +
         `━━━━━━━━━━━━━━━━━━━━\n` +
-        `🤖 Server: ${activeAccounts > 0 ? `✅ Online (${activeAccounts} akun aktif)` : '⚠️ Maintenance'}\n\n` +
-        `💡 /beli untuk tambah kredit\n` +
-        `💡 /gpti email@gmail.com untuk invite`,
+        `🤖 Server: ${activeAccounts > 0 ? `✅ Online (${activeAccounts} akun aktif)` : '⚠️ Sedang maintenance'}\n\n` +
+        `▸ /beli — tambah kredit\n` +
+        `▸ /gpti email@gmail.com — invite sekarang`,
         { parse_mode: 'Markdown' }
     );
 });

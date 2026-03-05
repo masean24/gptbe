@@ -381,6 +381,16 @@ app.get('/api/web/pay/status/:transactionId', async (req, res) => {
     const { transactionId } = req.params;
     const txn = await Transaction.findOne({ qrisTransactionId: transactionId, type: 'qris' });
     if (!txn) return res.status(404).json({ error: 'Transaksi tidak ditemukan' });
+
+    // Auto-expire pending transactions older than 15 minutes
+    if (txn.qrisStatus === 'pending') {
+        const ageMs = Date.now() - new Date(txn.createdAt).getTime();
+        if (ageMs > 15 * 60 * 1000) {
+            txn.qrisStatus = 'expired';
+            await txn.save();
+        }
+    }
+
     res.json({ status: txn.qrisStatus });
 });
 
