@@ -37,8 +37,14 @@ sudo npm install -g pm2
 
 ### B. Install Dependencies Browser (untuk Playwright)
 
+Untuk **Ubuntu 20.04 / 22.04**:
 ```bash
 sudo apt install -y libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2
+```
+
+Untuk **Ubuntu 24.04** (Jika muncul error `libasound2 is a virtual package`):
+```bash
+sudo apt install -y libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2t64
 ```
 
 ### C. Clone & Install

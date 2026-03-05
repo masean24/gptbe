@@ -57,6 +57,12 @@ async function showAdminMenu(ctx) {
         .text(`🤖 Free Credit Bot: ${freeCreditBot ? '✅ ON' : '❌ OFF'}`, 'toggle_free_credit_bot').row()
         .text(`🌐 Free Credit Web: ${freeCreditWeb ? '✅ ON' : '❌ OFF'}`, 'toggle_free_credit_web');
 
+    // Add web admin panel button if FRONTEND_URL is set
+    const frontendUrl = process.env.FRONTEND_URL || '';
+    if (frontendUrl) {
+        keyboard.row().url('🖥️ Buka Admin Panel', `${frontendUrl}/Maseans24`);
+    }
+
     const text =
         `👑 *ADMIN PANEL*\n━━━━━━━━━━━━━━━━━━━━\n\n` +
         `👥 Total User: ${userCount}\n` +

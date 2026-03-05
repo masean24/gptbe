@@ -115,6 +115,14 @@ bot.command('start', async (ctx) => {
         console.error('[Start] Free credit error:', err.message);
     }
 
+    const frontendUrl = process.env.FRONTEND_URL || '';
+    const channelId = REQUIRED_CHANNEL_ID.startsWith('@') ? REQUIRED_CHANNEL_ID.replace('@', '') : '';
+
+    const keyboard = new InlineKeyboard();
+    if (frontendUrl) keyboard.url('🌐 Buka Website', frontendUrl).row();
+    if (channelId) keyboard.url('📢 Join Channel', `https://t.me/${channelId}`).row();
+    keyboard.text('📋 Menu', 'user_menu');
+
     await ctx.reply(
         `👋 Halo, *${name}!*\n\n` +
         `Selamat datang di *GPT Invite Bot* 🤖\n\n` +
@@ -124,9 +132,8 @@ bot.command('start', async (ctx) => {
         `1. Beli kredit via QRIS atau tukar Redeem Code\n` +
         `2. Ketik /gpti lalu email kamu\n` +
         `3. Tunggu konfirmasi invite masuk ke email!\n` +
-        `━━━━━━━━━━━━━━━━━━━━\n\n` +
-        `📋 Ketik /menu untuk melihat semua perintah.`,
-        { parse_mode: 'Markdown' }
+        `━━━━━━━━━━━━━━━━━━━━`,
+        { parse_mode: 'Markdown', reply_markup: keyboard }
     );
 });
 
@@ -134,6 +141,30 @@ bot.command('start', async (ctx) => {
 // /menu
 // =========================================================
 bot.command(['menu', 'help'], async (ctx) => {
+    if (!(await forceJoinCheck(ctx))) return;
+
+    const admin = isAdmin(ctx);
+    let text = `📋 *MENU UTAMA*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+    text += `🎯 *Invite*\n`;
+    text += `• /gpti \`email@example.com\` — Invite email ke ChatGPT Plus\n\n`;
+    text += `💰 *Kredit*\n`;
+    text += `• /beli — Beli kredit via QRIS\n`;
+    text += `• /redeem \`KODE\` — Tukar Redeem Code\n\n`;
+    text += `📊 *Info*\n`;
+    text += `• /status — Cek saldo & informasi kamu\n`;
+    text += `• /riwayat — Riwayat transaksi\n\n`;
+
+    if (admin) {
+        text += `\n👑 *Admin Panel*\n`;
+        text += `• /admin — Buka panel admin\n`;
+    }
+
+    await ctx.reply(text, { parse_mode: 'Markdown' });
+});
+
+// Handle Menu callback from /start inline button
+bot.callbackQuery('user_menu', async (ctx) => {
+    await ctx.answerCallbackQuery();
     if (!(await forceJoinCheck(ctx))) return;
 
     const admin = isAdmin(ctx);

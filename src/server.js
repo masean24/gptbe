@@ -12,6 +12,7 @@ const Account = require('./models/Account');
 const RedeemCode = require('./models/RedeemCode');
 const Transaction = require('./models/Transaction');
 const Settings = require('./models/Settings');
+const ActivityLog = require('./models/ActivityLog');
 const InviteJob = require('./models/InviteJob');
 const { handleWebhookPayload, verifyWebhookSecret, createPayment, CREDIT_PRICE } = require('./services/qrisService');
 const { enqueue } = require('./services/queueService');
@@ -59,8 +60,7 @@ function authMiddleware(req, res, next) {
 }
 
 function adminMiddleware(req, res, next) {
-    const adminIds = (process.env.ADMIN_IDS || '').split(',').map(id => id.trim());
-    if (!adminIds.includes(String(req.user?.telegramId))) {
+    if (!req.user?.isAdmin) {
         return res.status(403).json({ error: 'Admin only' });
     }
     next();
@@ -93,7 +93,10 @@ app.post('/api/web/auth/register', authLimiter, async (req, res) => {
         if (existing) return res.status(400).json({ error: 'Email sudah terdaftar' });
 
         const hashed = await bcrypt.hash(password, 12);
-        await WebUser.create({ email: cleanEmail, password: hashed });
+        const newUser = await WebUser.create({ email: cleanEmail, password: hashed });
+
+        // Log activity
+        await ActivityLog.create({ userId: `webuser_${newUser._id}`, userEmail: cleanEmail, action: 'register', ip: req.ip });
 
         // Notify admin channel
         await notifyNewWebRegistration(cleanEmail);
@@ -123,6 +126,9 @@ app.post('/api/web/auth/login', authLimiter, async (req, res) => {
 
         user.lastLoginAt = new Date();
         await user.save();
+
+        // Log activity
+        await ActivityLog.create({ userId: `webuser_${user._id}`, userEmail: user.email, action: 'login', ip: req.ip }).catch(() => { });
 
         const token = jwt.sign(
             { webUserId: String(user._id), email: user.email },
@@ -268,6 +274,9 @@ app.post('/api/web/user/redeem', authMiddleware, webUserMiddleware, async (req, 
             description: `Redeem code ${code.toUpperCase()} (+${codeDoc.credits} kredit)`,
         });
 
+        // Log activity
+        await ActivityLog.create({ userId: `webuser_${user._id}`, userEmail: user.email, action: 'redeem', details: { code: code.toUpperCase(), credits: codeDoc.credits }, ip: req.ip }).catch(() => { });
+
         await notifyRedeemUsed(code.toUpperCase(), codeDoc.credits, 'web');
 
         res.json({
@@ -313,6 +322,9 @@ app.post('/api/web/user/invite', authMiddleware, webUserMiddleware, async (req, 
             description: `Invite ${targetEmail}`,
         });
 
+        // Log activity
+        await ActivityLog.create({ userId: `webuser_${user._id}`, userEmail: user.email, action: 'invite', details: { email: targetEmail }, ip: req.ip }).catch(() => { });
+
         // Enqueue
         const { jobId, position } = await enqueue(`webuser_${user._id}`, targetEmail);
 
@@ -343,6 +355,9 @@ app.post('/api/web/user/pay', authMiddleware, webUserMiddleware, async (req, res
         if (!user) return res.status(404).json({ error: 'User tidak ditemukan' });
 
         const payment = await createPayment(`webuser_${user._id}`, credits);
+
+        // Log activity
+        await ActivityLog.create({ userId: `webuser_${user._id}`, userEmail: user.email, action: 'buy_credit', details: { credits, amount: payment.amountTotal }, ip: req.ip }).catch(() => { });
 
         res.json({
             success: true,
@@ -419,6 +434,8 @@ app.post('/api/webhooks/qris', async (req, res) => {
                 if (webUser) {
                     webUser.credits += result.creditsAdded || 1;
                     await webUser.save();
+                    // Log activity
+                    await ActivityLog.create({ userId: result.telegramId, userEmail: webUser.email, action: 'payment_received', details: { amount: result.amount || CREDIT_PRICE, credits: result.creditsAdded || 1 } }).catch(() => { });
                 }
                 await notifyPaymentReceived(result.amount || CREDIT_PRICE, result.creditsAdded || 1, 'web-dashboard');
             } else if (result.telegramId && result.telegramId.startsWith('web_')) {
@@ -446,18 +463,21 @@ app.post('/api/webhooks/qris', async (req, res) => {
 });
 
 // =========================================================
-// Admin: Auth login
+// Admin: Auth login (username + password)
 // =========================================================
-app.post('/api/auth/login', async (req, res) => {
-    const { telegramId } = req.body;
-    if (!telegramId) return res.status(400).json({ error: 'telegramId required' });
+app.post('/api/auth/login', authLimiter, async (req, res) => {
+    const { username, password } = req.body;
+    if (!username || !password) return res.status(400).json({ error: 'Username dan password diperlukan' });
 
-    const adminIds = (process.env.ADMIN_IDS || '').split(',').map(id => id.trim());
-    if (!adminIds.includes(String(telegramId))) {
-        return res.status(403).json({ error: 'Admin only' });
+    const adminUsername = process.env.ADMIN_USERNAME || 'admin';
+    const adminPassword = process.env.ADMIN_PASSWORD;
+    if (!adminPassword) return res.status(500).json({ error: 'Admin password not configured' });
+
+    if (username !== adminUsername || password !== adminPassword) {
+        return res.status(403).json({ error: 'Username atau password salah' });
     }
 
-    const token = jwt.sign({ telegramId: String(telegramId), isAdmin: true }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign({ isAdmin: true }, process.env.JWT_SECRET, { expiresIn: '7d' });
     res.json({ token, isAdmin: true });
 });
 
@@ -596,6 +616,9 @@ app.post('/api/admin/web-users/:id/approve', authMiddleware, adminMiddleware, as
         user.freeCreditsGiven = true;
         await user.save();
 
+        // Log activity
+        await ActivityLog.create({ userId: `webuser_${user._id}`, userEmail: user.email, action: 'approve', details: { code, credits } }).catch(() => { });
+
         res.json({
             success: true,
             code,
@@ -614,13 +637,41 @@ app.post('/api/admin/web-users/:id/block', authMiddleware, adminMiddleware, asyn
     try {
         const user = await WebUser.findById(req.params.id);
         if (!user) return res.status(404).json({ error: 'User tidak ditemukan' });
+        const wasBlocked = user.isBlocked;
         user.isBlocked = !user.isBlocked;
         await user.save();
+
+        // Log activity
+        await ActivityLog.create({ userId: `webuser_${user._id}`, userEmail: user.email, action: wasBlocked ? 'unblock' : 'block' }).catch(() => { });
+
         res.json({ success: true, isBlocked: user.isBlocked });
     } catch (err) {
         res.status(500).json({ error: 'Server error' });
     }
 });
+
+// =========================================================
+// Admin: User Activity Logs
+// =========================================================
+app.get('/api/admin/web-users/:id/logs', authMiddleware, adminMiddleware, async (req, res) => {
+    try {
+        const { limit = 20, page = 1 } = req.query;
+        const user = await WebUser.findById(req.params.id);
+        if (!user) return res.status(404).json({ error: 'User tidak ditemukan' });
+
+        const userId = `webuser_${user._id}`;
+        const logs = await ActivityLog.find({ userId })
+            .sort({ createdAt: -1 })
+            .skip((page - 1) * limit)
+            .limit(parseInt(limit));
+        const total = await ActivityLog.countDocuments({ userId });
+
+        res.json({ logs, total, page: parseInt(page), limit: parseInt(limit) });
+    } catch (err) {
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
 
 // =========================================================
 // Admin: Settings (toggles)
