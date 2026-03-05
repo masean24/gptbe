@@ -159,11 +159,68 @@ function registerAdminHandlers(bot) {
         accounts.forEach((acc, i) => {
             const statusEmoji = acc.status === 'active' ? '✅' : acc.status === 'full' ? '🔴' : '❌';
             text += `${i + 1}. ${statusEmoji} \`${acc.email}\`\n`;
-            text += `   📨 ${acc.inviteCount}/${acc.maxInvites} | 🔐Session: ${acc.hasSession ? '✅' : '❌'}\n\n`;
+            text += `   📨 ${acc.inviteCount}/${acc.maxInvites} | 🔐Session: ${acc.hasSession ? '✅' : '❌'}\n`;
+            text += `   🆔 \`${acc._id}\`\n\n`;
         });
 
-        const keyboard = new InlineKeyboard().text('➕ Tambah Akun', 'adm_addaccount').row().text('⬅️ Kembali', 'adm_back');
+        text += `\n_Klik tombol di bawah untuk mengelola akun:_`;
+
+        const keyboard = new InlineKeyboard()
+            .text('➕ Tambah Akun', 'adm_addaccount').row()
+            .text('🗑️ Hapus Akun', 'adm_delaccount_choose').row()
+            .text('⬅️ Kembali', 'adm_back');
         await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
+    }));
+
+    // ---- CHOOSE ACCOUNT TO DELETE ----
+    bot.callbackQuery('adm_delaccount_choose', adminOnly(async (ctx) => {
+        await ctx.answerCallbackQuery();
+        const accounts = await Account.find().sort({ createdAt: -1 });
+        if (!accounts.length) {
+            return ctx.editMessageText('📭 Tidak ada akun untuk dihapus.', {
+                reply_markup: new InlineKeyboard().text('⬅️ Kembali', 'adm_listaccounts'),
+            });
+        }
+
+        let text = `🗑️ *HAPUS AKUN*\n━━━━━━━━━━━━━━━━━━━━\n\nPilih akun yang ingin dihapus:`;
+        const keyboard = new InlineKeyboard();
+        accounts.forEach((acc) => {
+            const statusEmoji = acc.status === 'active' ? '✅' : acc.status === 'full' ? '🔴' : '❌';
+            keyboard.text(`${statusEmoji} ${acc.email}`, `adm_del_${acc._id}`).row();
+        });
+        keyboard.text('⬅️ Kembali', 'adm_listaccounts');
+
+        await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
+    }));
+
+    // ---- CONFIRM DELETE ----
+    bot.callbackQuery(/^adm_del_(.+)$/, adminOnly(async (ctx) => {
+        await ctx.answerCallbackQuery();
+        const accountId = ctx.match[1];
+
+        // If it's a confirmation
+        if (accountId.startsWith('confirm_')) {
+            const realId = accountId.replace('confirm_', '');
+            const account = await Account.findByIdAndDelete(realId);
+            if (!account) return ctx.editMessageText('❌ Akun tidak ditemukan!');
+            await ctx.editMessageText(
+                `✅ Akun \`${account.email}\` berhasil dihapus!`,
+                { parse_mode: 'Markdown', reply_markup: new InlineKeyboard().text('⬅️ Kembali ke List', 'adm_listaccounts') }
+            );
+            return;
+        }
+
+        const account = await Account.findById(accountId);
+        if (!account) return ctx.editMessageText('❌ Akun tidak ditemukan!');
+
+        const keyboard = new InlineKeyboard()
+            .text(`✅ Ya, Hapus ${account.email}`, `adm_del_confirm_${accountId}`).row()
+            .text('❌ Batal', 'adm_listaccounts');
+
+        await ctx.editMessageText(
+            `⚠️ *Yakin hapus akun ini?*\n\n📧 \`${account.email}\`\n📨 Invite: ${account.inviteCount}/${account.maxInvites}\n🔐 Session: ${account.hasSession ? '✅' : '❌'}`,
+            { parse_mode: 'Markdown', reply_markup: keyboard }
+        );
     }));
 
     // ---- ADD ACCOUNT (start flow) ----

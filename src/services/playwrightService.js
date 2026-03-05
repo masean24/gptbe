@@ -5,9 +5,23 @@ const fs = require('fs');
 
 chromium.use(StealthPlugin());
 
-let browserInstance = null;
-
 const ADMIN_IDS = (process.env.ADMIN_IDS || '').split(',').map(id => id.trim()).filter(Boolean);
+
+// ============ PROXY POOL ============
+const PROXY_LIST = (process.env.PROXY_LIST || '')
+    .split(',')
+    .map(p => p.trim())
+    .filter(Boolean)
+    .map(p => (p.startsWith('http') ? p : `http://${p}`));
+
+let proxyIndex = 0;
+
+function getNextProxy() {
+    if (PROXY_LIST.length === 0) return null;
+    const proxy = PROXY_LIST[proxyIndex % PROXY_LIST.length];
+    proxyIndex++;
+    return proxy;
+}
 
 /**
  * Save screenshot and send to admin via Telegram
@@ -17,7 +31,6 @@ async function sendScreenshotToAdmin(page, label) {
     try {
         await page.screenshot({ path, fullPage: true });
         console.log(`[Playwright] Screenshot saved: ${path}`);
-        // Send to admin via Telegram
         if (ADMIN_IDS.length > 0) {
             const { bot } = require('../bot/userHandlers');
             const { InputFile } = require('grammy');
@@ -33,22 +46,62 @@ async function sendScreenshotToAdmin(page, label) {
     }
 }
 
-async function launchBrowser() {
-    if (browserInstance) {
-        try { await browserInstance.close(); } catch (_) { }
-    }
-    browserInstance = await chromium.launch({
+/**
+ * Launch a fresh browser instance (each invite gets its own browser)
+ */
+async function launchBrowser(proxy) {
+    const launchOptions = {
         headless: true,
         args: ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-setuid-sandbox'],
-    });
-    return browserInstance;
+    };
+
+    if (proxy) {
+        launchOptions.proxy = { server: proxy };
+        console.log(`[Playwright] Using proxy: ${proxy}`);
+    }
+
+    return chromium.launch(launchOptions);
+}
+
+/**
+ * Dismiss any popup/modal by pressing Escape
+ */
+async function dismissPopups(page) {
+    try {
+        // Check for "Business workspace ready" or similar popups
+        const popupTexts = ['workspace is ready', 'transfer chat', 'start as empty'];
+        const bodyText = (await page.textContent('body'))?.toLowerCase() || '';
+        const hasPopup = popupTexts.some(t => bodyText.includes(t));
+
+        if (hasPopup) {
+            console.log('[Playwright] Popup detected, pressing Escape...');
+            await page.keyboard.press('Escape');
+            await page.waitForTimeout(2000);
+
+            // If popup persists, try clicking "Start as empty workspace" then Continue
+            const emptyOption = page.locator('text=Start as empty workspace');
+            if ((await emptyOption.count()) > 0) {
+                await emptyOption.click();
+                await page.waitForTimeout(1000);
+                const continueBtn = page.locator('button:has-text("Continue")');
+                if ((await continueBtn.count()) > 0) {
+                    await continueBtn.first().click();
+                    console.log('[Playwright] Clicked "Start as empty workspace" + Continue');
+                    await page.waitForTimeout(3000);
+                }
+            }
+        }
+    } catch (err) {
+        console.log('[Playwright] Popup dismiss error (non-fatal):', err.message);
+    }
 }
 
 /**
  * Login to ChatGPT and save session as JSON string (for MongoDB storage)
  */
 async function loginAccount(account) {
-    const browser = await launchBrowser();
+    const proxy = getNextProxy();
+    const browser = await launchBrowser(proxy);
     const context = await browser.newContext({
         viewport: { width: 1280, height: 720 },
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -57,20 +110,20 @@ async function loginAccount(account) {
 
     try {
         await page.goto('https://chat.openai.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
-        await page.waitForTimeout(3000);
+        await page.waitForTimeout(5000);
 
         await page.click('button:has-text("Log in")');
-        await page.waitForTimeout(2000);
+        await page.waitForTimeout(3000);
 
-        await page.waitForSelector('input[type="email"]', { timeout: 10000 });
+        await page.waitForSelector('input[type="email"]', { timeout: 15000 });
         await page.fill('input[type="email"]', account.email);
         await page.click('button.btn-primary[type="submit"]');
-        await page.waitForTimeout(2000);
+        await page.waitForTimeout(3000);
 
         const passwordInput = await page.waitForSelector('input[type="password"]');
         await passwordInput.fill(account.password);
         await page.click('button[type="submit"]');
-        await page.waitForTimeout(3000);
+        await page.waitForTimeout(5000);
 
         // Handle 2FA
         const has2FA = await page.locator('input[type="text"][autocomplete="one-time-code"], input[name="code"]').count() > 0;
@@ -79,14 +132,14 @@ async function loginAccount(account) {
             const codeInput = await page.waitForSelector('input[type="text"][autocomplete="one-time-code"], input[name="code"]');
             await codeInput.fill(token);
             await page.click('button[type="submit"], button:has-text("Continue"), button:has-text("Verify")');
-            await page.waitForTimeout(1500);
+            await page.waitForTimeout(3000);
         }
 
         try {
             await page.waitForURL(/chatgpt\.com|auth\.openai\.com\/workspace/, { timeout: 60000 });
         } catch (_) { }
 
-        await page.waitForTimeout(3000);
+        await page.waitForTimeout(5000);
 
         // Handle workspace selection
         const workspaceBtn = await page.locator('button[name="workspace_id"]').count() > 0;
@@ -94,38 +147,32 @@ async function loginAccount(account) {
             const firstBtn = page.locator('button[name="workspace_id"]').first();
             await firstBtn.click({ force: true });
             try { await page.waitForURL(/chatgpt\.com/, { timeout: 60000 }); } catch (_) { }
-            await page.waitForTimeout(3000);
+            await page.waitForTimeout(5000);
         }
+
+        // Dismiss any popups
+        await dismissPopups(page);
 
         const currentUrl = page.url();
         const isLoggedIn = currentUrl.includes('chatgpt.com') && !currentUrl.includes('auth') && !currentUrl.includes('workspace');
         if (!isLoggedIn) throw new Error('Login gagal - URL masih di halaman auth');
 
-        // Save session as JSON string for MongoDB
         const sessionData = await context.storageState();
         await browser.close();
-        browserInstance = null;
         return { success: true, sessionData: JSON.stringify(sessionData) };
     } catch (error) {
         try { await browser.close(); } catch (_) { }
-        browserInstance = null;
         return { success: false, message: error.message };
     }
 }
 
 /**
  * Invite a team member to ChatGPT Team workspace
- *
- * Flow (as of 2026-03):
- * 1. Go to chatgpt.com (main page, not admin)
- * 2. Click "Invite team members" button in bottom-left sidebar
- * 3. Popup with 5 email inputs appears ("Invite members to ... workspace")
- * 4. Fill first email input, click "Next"
- * 5. Confirm page shows email + role, click "Send invites"
- * 6. Wait for green toast "Invited 1 user to ..."
+ * Each call gets its own browser + proxy from the pool.
  */
 async function inviteTeamMember(account, targetEmail) {
-    const browser = await launchBrowser();
+    const proxy = getNextProxy();
+    const browser = await launchBrowser(proxy);
 
     let context;
     if (account.sessionData) {
@@ -135,6 +182,7 @@ async function inviteTeamMember(account, targetEmail) {
             userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         });
     } else {
+        await browser.close();
         throw new Error('Akun belum memiliki session. Silakan login akun dulu.');
     }
 
@@ -142,127 +190,111 @@ async function inviteTeamMember(account, targetEmail) {
 
     try {
         // ============ Step 1: Navigate to chatgpt.com ============
-        console.log('[Playwright] Step 1: Navigating to chatgpt.com...');
+        console.log(`[Playwright][${targetEmail}] Step 1: Navigating to chatgpt.com...`);
         await page.goto('https://chatgpt.com/', {
             waitUntil: 'networkidle',
-            timeout: 60000,
+            timeout: 90000,
         });
-        await page.waitForTimeout(5000);
+        await page.waitForTimeout(8000);
 
         const currentUrl = page.url();
-        console.log(`[Playwright] Current URL: ${currentUrl}`);
+        console.log(`[Playwright][${targetEmail}] URL: ${currentUrl}`);
 
         if (currentUrl.includes('auth') || currentUrl.includes('login')) {
             await sendScreenshotToAdmin(page, 'session_expired');
             await browser.close();
-            browserInstance = null;
             return { success: false, message: 'Session expired. Silakan login ulang akun via /loginaccount' };
         }
 
-
+        // ============ Dismiss popups ============
+        await dismissPopups(page);
 
         // ============ Step 2: Open sidebar & click "Invite team members" ============
-        console.log('[Playwright] Step 2: Opening sidebar...');
+        console.log(`[Playwright][${targetEmail}] Step 2: Opening sidebar...`);
         const openSidebarBtn = page.locator('button[aria-label="Open sidebar"]');
         if ((await openSidebarBtn.count()) > 0) {
             await openSidebarBtn.click();
-            console.log('[Playwright] Sidebar opened');
-            await page.waitForTimeout(2000);
-        } else {
-            console.log('[Playwright] Sidebar already open or toggle not found');
+            console.log(`[Playwright][${targetEmail}] Sidebar opened`);
+            await page.waitForTimeout(3000);
         }
 
-        console.log('[Playwright] Looking for "Invite team members" button...');
+        console.log(`[Playwright][${targetEmail}] Looking for "Invite team members" button...`);
         const inviteBtn = page.locator('button:has-text("Invite team members")');
         const inviteBtnCount = await inviteBtn.count();
-        console.log(`[Playwright] "Invite team members" buttons found: ${inviteBtnCount}`);
+        console.log(`[Playwright][${targetEmail}] Invite buttons found: ${inviteBtnCount}`);
 
         if (inviteBtnCount === 0) {
             await sendScreenshotToAdmin(page, 'no_invite_btn');
             await browser.close();
-            browserInstance = null;
             return { success: false, message: 'Tombol "Invite team members" tidak ditemukan di sidebar.' };
         }
 
         await inviteBtn.first().click();
-        console.log('[Playwright] "Invite team members" button clicked');
-        await page.waitForTimeout(5000);
+        console.log(`[Playwright][${targetEmail}] Invite button clicked`);
+        await page.waitForTimeout(6000);
 
-        // ============ Step 3: Fill email in first input (with retry) ============
-        console.log(`[Playwright] Step 3: Filling email ${targetEmail}...`);
-
-        // Retry loop — popup may take time to appear on slower servers
+        // ============ Step 3: Fill email ============
+        console.log(`[Playwright][${targetEmail}] Step 3: Filling email...`);
         let emailFilled = false;
-        for (let attempt = 0; attempt < 10; attempt++) {
+        for (let attempt = 0; attempt < 15; attempt++) {
             const emailInputs = page.locator('input[placeholder="Email"]');
-            const emailInputCount = await emailInputs.count();
-
-            if (emailInputCount > 0) {
+            if ((await emailInputs.count()) > 0) {
                 await emailInputs.first().fill(targetEmail);
-                console.log(`[Playwright] Email filled: ${targetEmail} (attempt ${attempt + 1})`);
                 emailFilled = true;
                 break;
             }
-
-            // Fallback selectors
             const altInput = page.locator('input[type="email"], input[placeholder*="email" i]');
             if ((await altInput.count()) > 0) {
                 await altInput.first().fill(targetEmail);
-                console.log(`[Playwright] Email filled via alt selector (attempt ${attempt + 1})`);
                 emailFilled = true;
                 break;
             }
-
-            console.log(`[Playwright] Email input not found yet, retrying... (${attempt + 1}/10)`);
-            await page.waitForTimeout(1000);
+            console.log(`[Playwright][${targetEmail}] Email input not found, retrying... (${attempt + 1}/15)`);
+            await page.waitForTimeout(1500);
         }
 
         if (!emailFilled) {
             await sendScreenshotToAdmin(page, 'no_email_input');
             await browser.close();
-            browserInstance = null;
             return { success: false, message: 'Input email tidak ditemukan di popup invite.' };
         }
 
-        console.log(`[Playwright] Email filled: ${targetEmail}`);
-        await page.waitForTimeout(1000);
-
+        console.log(`[Playwright][${targetEmail}] Email filled`);
+        await page.waitForTimeout(2000);
 
         // ============ Step 4: Click "Next" ============
-        console.log('[Playwright] Step 4: Clicking "Next"...');
+        console.log(`[Playwright][${targetEmail}] Step 4: Clicking Next...`);
         const nextBtn = page.locator('button:has-text("Next")');
         if ((await nextBtn.count()) === 0) {
             await sendScreenshotToAdmin(page, '4_no_next_btn');
             await browser.close();
-            browserInstance = null;
             return { success: false, message: 'Tombol "Next" tidak ditemukan.' };
         }
 
         await nextBtn.first().click();
-        console.log('[Playwright] "Next" clicked');
-        await page.waitForTimeout(3000);
+        console.log(`[Playwright][${targetEmail}] Next clicked`);
+        await page.waitForTimeout(4000);
 
         // ============ Step 5: Click "Send invites" ============
-        console.log('[Playwright] Step 5: Clicking "Send invites"...');
+        console.log(`[Playwright][${targetEmail}] Step 5: Clicking Send invites...`);
         const sendBtn = page.locator('button:has-text("Send invites"), button:has-text("Send invite")');
         if ((await sendBtn.count()) === 0) {
             await sendScreenshotToAdmin(page, '5_no_send_btn');
             await browser.close();
-            browserInstance = null;
             return { success: false, message: 'Tombol "Send invites" tidak ditemukan.' };
         }
 
         await sendBtn.first().click();
-        console.log('[Playwright] "Send invites" clicked');
+        console.log(`[Playwright][${targetEmail}] Send invites clicked`);
 
-        // ============ Step 6: Wait for green toast ============
-        console.log('[Playwright] Step 6: Waiting for success toast...');
+        // ============ Step 6: Wait for success toast ============
+        console.log(`[Playwright][${targetEmail}] Step 6: Waiting for success toast...`);
         let success = false;
-        for (let i = 0; i < 20; i++) {
-            await page.waitForTimeout(1000);
+        for (let i = 0; i < 25; i++) {
+            await page.waitForTimeout(1500);
             const pageText = (await page.textContent('body'))?.toLowerCase() || '';
             if (pageText.includes('invited') && pageText.includes('user')) {
-                console.log('[Playwright] Success toast detected!');
+                console.log(`[Playwright][${targetEmail}] Success toast detected!`);
                 success = true;
                 break;
             }
@@ -270,20 +302,17 @@ async function inviteTeamMember(account, targetEmail) {
 
         if (success) {
             await browser.close();
-            browserInstance = null;
             return { success: true, message: `Invite berhasil dikirim ke ${targetEmail}` };
         } else {
             await sendScreenshotToAdmin(page, 'no_confirmation');
             await browser.close();
-            browserInstance = null;
             return { success: false, message: `Tidak ada konfirmasi invite untuk ${targetEmail}. Cek screenshot.` };
         }
 
     } catch (error) {
-        console.error(`[Playwright] Error during invite:`, error.message);
+        console.error(`[Playwright][${targetEmail}] Error:`, error.message);
         try { await sendScreenshotToAdmin(page, 'error'); } catch (_) { }
         try { await browser.close(); } catch (_) { }
-        browserInstance = null;
         return { success: false, message: `Error: ${error.message}` };
     }
 }

@@ -33,6 +33,8 @@ async function refundWebRedeem(telegramId) {
 }
 
 let isProcessing = false;
+const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT_INVITES || '1');
+let activeWorkers = 0;
 
 /**
  * Add a new invite job to the queue
@@ -56,7 +58,7 @@ async function getQueuePosition(jobId) {
 }
 
 /**
- * Main queue processor - single concurrency (safe for VPS 1/1)
+ * Main queue processor - concurrent workers (controlled by MAX_CONCURRENT_INVITES)
  */
 async function processQueue() {
     if (isProcessing) return;
@@ -64,6 +66,12 @@ async function processQueue() {
 
     try {
         while (true) {
+            // Wait if we're at max capacity
+            if (activeWorkers >= MAX_CONCURRENT) {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                continue;
+            }
+
             const job = await InviteJob.findOneAndUpdate(
                 { status: 'queued' },
                 { status: 'processing', processedAt: new Date() },
@@ -71,20 +79,32 @@ async function processQueue() {
             );
             if (!job) break;
 
-            try {
-                await processJob(job);
-            } catch (err) {
-                console.error(`[Queue] Error processing job ${job._id}:`, err.message);
-                console.error(`[Queue] Full error:`, err);
-                job.status = 'failed';
-                job.result = `Internal error: ${err.message}`;
-                await job.save();
-                await notifyInviteFailed(job.targetEmail, err.message);
-                await notifyUser(job.telegramId, job.targetEmail, err.message);
-                await refundWebRedeem(job.telegramId);
-            }
+            // Launch worker without blocking the loop
+            activeWorkers++;
+            (async () => {
+                try {
+                    await processJob(job);
+                } catch (err) {
+                    console.error(`[Queue] Error processing job ${job._id}:`, err.message);
+                    job.status = 'failed';
+                    job.result = `Internal error: ${err.message}`;
+                    await job.save();
+                    await notifyInviteFailed(job.targetEmail, err.message);
+                    await notifyUser(job.telegramId, job.targetEmail, err.message);
+                    await refundWebRedeem(job.telegramId);
+                } finally {
+                    activeWorkers--;
+                }
+            })();
+
+            // Small delay between spawning workers
+            await new Promise(resolve => setTimeout(resolve, 3000));
         }
     } finally {
+        // Wait for all active workers to finish
+        while (activeWorkers > 0) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        }
         isProcessing = false;
     }
 }
