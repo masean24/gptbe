@@ -23,6 +23,7 @@ const app = express();
 // =========================================================
 // Middleware
 // =========================================================
+app.set('trust proxy', 1);
 app.use(helmet());
 
 const frontendUrl = (process.env.FRONTEND_URL || '').replace(/\/+$/, '');

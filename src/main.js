@@ -28,6 +28,9 @@ async function main() {
     console.log('🤖 Starting Telegram Bot...');
     bot.start({
         onStart: (info) => console.log(`✅ Bot @${info.username} is running!`),
+    }).catch((err) => {
+        console.error('❌ Bot failed to start:', err.message);
+        console.error('   Check BOT_TOKEN in .env — you may need to revoke and recreate via @BotFather');
     });
 
     // Resume any stuck queued jobs
