@@ -1,38 +1,48 @@
 /**
- * Test script untuk debug invite flow secara lokal dengan browser VISIBLE.
+ * Test script untuk debug invite flow.
  *
  * Cara pakai:
- *   1. Pastikan sudah `npm install` di folder backend
- *   2. Set MONGODB_URI di .env atau langsung di bawah
- *   3. Jalankan: node test-invite.js
+ *   node test-invite.js [email1] [email2] ... --proxy IP:PORT
+ *
+ * Contoh:
+ *   node test-invite.js a@gmail.com --proxy 45.3.34.245:3129
+ *   node test-invite.js a@gmail.com b@gmail.com --proxy 45.3.34.245:3129
+ *   node test-invite.js a@gmail.com b@gmail.com   (tanpa proxy)
  *
  * Script ini akan:
  *   - Connect ke MongoDB
- *   - Ambil akun ChatGPT pertama yang punya session
- *   - Buka browser VISIBLE (bukan headless)
- *   - Jalankan flow invite step by step
- *   - Pause di setiap step supaya kamu bisa lihat
+ *   - Ambil akun aktif sebanyak jumlah email
+ *   - Jalankan semua invite PARALEL, masing-masing browser sendiri
+ *   - Opsional pakai HTTP proxy
  */
 
 require('dotenv').config();
 const { chromium } = require('playwright-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const mongoose = require('mongoose');
-const readline = require('readline');
+const { parseProxy } = require('./src/services/playwrightService');
 
 chromium.use(StealthPlugin());
 
-// ============ CONFIG ============
-const MONGODB_URI = process.env.MONGODB_URI || 'PASTE_MONGODB_URI_HERE';
-const TARGET_EMAIL = process.argv[2] || 'test@example.com';
-// ================================
+// ============ PARSE ARGS ============
+const rawArgs = process.argv.slice(2);
+let proxyServer = null;
+const emailArgs = [];
 
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-function pause(msg = 'Tekan ENTER untuk lanjut...') {
-    return new Promise(resolve => rl.question(`\n⏸️  ${msg}\n`, resolve));
+for (let i = 0; i < rawArgs.length; i++) {
+    if (rawArgs[i] === '--proxy' && rawArgs[i + 1]) {
+        const p = rawArgs[i + 1];
+        proxyServer = p.startsWith('http') ? p : `http://${p}`;
+        i++;
+    } else {
+        emailArgs.push(rawArgs[i]);
+    }
 }
 
-// Load ChatGPT account model (matches src/models/Account.js)
+const TARGET_EMAILS = emailArgs.length > 0 ? emailArgs : ['test@example.com'];
+const MONGODB_URI = process.env.MONGODB_URI || 'PASTE_MONGODB_URI_HERE';
+// ====================================
+
 const accountSchema = new mongoose.Schema({
     email: String,
     password: String,
@@ -47,26 +57,22 @@ const accountSchema = new mongoose.Schema({
 });
 const Account = mongoose.model('Account', accountSchema);
 
-async function main() {
-    console.log('🔌 Connecting to MongoDB...');
-    await mongoose.connect(MONGODB_URI);
-    console.log('✅ Connected!\n');
+// ============ SINGLE INVITE WORKER ============
+async function runInvite(account, targetEmail, workerIndex) {
+    const tag = `[Worker-${workerIndex}][${targetEmail}]`;
+    console.log(`${tag} Starting...`);
 
-    // Find account with session
-    const account = await Account.findOne({ hasSession: true, status: 'active' });
-    if (!account) {
-        console.log('❌ Tidak ada akun dengan session aktif di database.');
-        process.exit(1);
+    const launchOptions = {
+        headless: false,
+        args: ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-setuid-sandbox'],
+    };
+
+    if (proxyServer) {
+        launchOptions.proxy = parseProxy(proxyServer);
+        console.log(`${tag} Using proxy: ${JSON.stringify(launchOptions.proxy)}`);
     }
-    console.log(`📧 Akun: ${account.email}`);
-    console.log(`🎯 Target invite: ${TARGET_EMAIL}\n`);
 
-    // Launch visible browser
-    console.log('🌐 Launching browser (VISIBLE mode)...');
-    const browser = await chromium.launch({
-        headless: true,
-        args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
-    });
+    const browser = await chromium.launch(launchOptions);
 
     const context = await browser.newContext({
         storageState: JSON.parse(account.sessionData),
@@ -77,138 +83,155 @@ async function main() {
     const page = await context.newPage();
 
     try {
-        // ============ Step 1: Navigate ============
-        console.log('\n📍 Step 1: Navigating to chatgpt.com...');
-        await page.goto('https://chatgpt.com/', {
-            waitUntil: 'networkidle',
-            timeout: 60000,
-        });
+        // Step 1: Navigate
+        console.log(`${tag} Step 1: Navigating to chatgpt.com...`);
+        await page.goto('https://chatgpt.com/', { waitUntil: 'networkidle', timeout: 60000 });
+        await page.waitForTimeout(4000);
 
         const currentUrl = page.url();
-        console.log(`   URL: ${currentUrl}`);
-
         if (currentUrl.includes('auth') || currentUrl.includes('login')) {
-            console.log('❌ Session expired! Redirect ke login page.');
-            await pause('Browser terbuka, cek manual. Tekan ENTER untuk close.');
+            console.log(`${tag} ❌ Session expired!`);
             await browser.close();
-            process.exit(1);
+            return { email: targetEmail, success: false, reason: 'session_expired' };
         }
+        console.log(`${tag} URL: ${currentUrl}`);
 
-        console.log('   Waiting for page to fully load...');
-        await page.waitForTimeout(5000);
-
-        const title = await page.title();
-        console.log(`   Title: ${title}`);
-
-
-
-        // ============ Step 2: Open sidebar & find invite button ============
-        console.log('\n📍 Step 2: Opening sidebar...');
+        // Step 2: Open sidebar
         const openSidebarBtn = page.locator('button[aria-label="Open sidebar"]');
         if ((await openSidebarBtn.count()) > 0) {
             await openSidebarBtn.click();
-            console.log('   ✅ Sidebar opened!');
-            await page.waitForTimeout(2000);
-        } else {
-            console.log('   ℹ️ Sidebar already open or toggle not found');
+            await page.waitForTimeout(1500);
         }
 
-        console.log('   Looking for "Invite team members" button...');
-        let inviteBtn = page.locator('button:has-text("Invite team members")');
-        let inviteBtnCount = await inviteBtn.count();
-        console.log(`   "Invite team members" buttons found: ${inviteBtnCount}`);
-
-        if (inviteBtnCount > 0) {
-            console.log('   ✅ Found! Clicking...');
-            await inviteBtn.first().click();
-            await page.waitForTimeout(3000);
-        } else {
-            console.log('   ❌ Not found.');
-            console.log('   ❌ GAGAL: Invite button tidak ditemukan.');
+        // Step 3: Click invite button
+        console.log(`${tag} Step 2: Looking for "Invite team members"...`);
+        const inviteBtn = page.locator('button:has-text("Invite team members")');
+        if ((await inviteBtn.count()) === 0) {
+            console.log(`${tag} ❌ Invite button not found`);
             await browser.close();
-            await mongoose.disconnect();
-            rl.close();
-            process.exit(1);
+            return { email: targetEmail, success: false, reason: 'no_invite_button' };
+        }
+        await inviteBtn.first().click();
+        // Wait longer for popup to fully render
+        await page.waitForTimeout(6000);
+
+        // Step 4: Fill email
+        console.log(`${tag} Step 3: Filling email ${targetEmail}...`);
+        let emailFilled = false;
+        for (let attempt = 0; attempt < 15; attempt++) {
+            const emailInputs = page.locator('input[placeholder="Email"]');
+            if ((await emailInputs.count()) > 0) {
+                await emailInputs.first().fill(targetEmail);
+                emailFilled = true;
+                break;
+            }
+            const altInput = page.locator('input[type="email"], input[placeholder*="email" i]');
+            if ((await altInput.count()) > 0) {
+                await altInput.first().fill(targetEmail);
+                emailFilled = true;
+                break;
+            }
+            await page.waitForTimeout(1000);
         }
 
-
-
-        // ============ Step 3: Fill email ============
-        console.log(`\n📍 Step 3: Filling email: ${TARGET_EMAIL}`);
-        const emailInputs = page.locator('input[placeholder="Email"]');
-        const emailCount = await emailInputs.count();
-        console.log(`   Email inputs found: ${emailCount}`);
-
-        if (emailCount > 0) {
-            await emailInputs.first().fill(TARGET_EMAIL);
-            console.log('   ✅ Email filled!');
-        } else {
-            console.log('   ❌ Email input not found!');
-            const allInputs = await page.$$eval('input', els => els.map(el => ({
-                type: el.type,
-                placeholder: el.placeholder,
-                name: el.name,
-            })));
-            console.log('   All inputs:', JSON.stringify(allInputs, null, 2));
-
+        if (!emailFilled) {
+            console.log(`${tag} ❌ Email input not found`);
+            await browser.close();
+            return { email: targetEmail, success: false, reason: 'no_email_input' };
         }
 
-
-
-        // ============ Step 4: Click Next ============
-        console.log('\n📍 Step 4: Clicking "Next"...');
+        // Step 5: Click Next
+        console.log(`${tag} Step 4: Clicking Next...`);
         const nextBtn = page.locator('button:has-text("Next")');
         if ((await nextBtn.count()) > 0) {
             await nextBtn.first().click();
-            console.log('   ✅ Next clicked!');
             await page.waitForTimeout(3000);
         } else {
-            console.log('   ❌ Next button not found!');
-
+            console.log(`${tag} ❌ Next button not found`);
+            await browser.close();
+            return { email: targetEmail, success: false, reason: 'no_next_button' };
         }
 
-
-
-        // ============ Step 5: Click Send invites ============
-        console.log('\n📍 Step 5: Clicking "Send invites"...');
+        // Step 6: Click Send invites
+        console.log(`${tag} Step 5: Clicking Send invites...`);
         const sendBtn = page.locator('button:has-text("Send invites"), button:has-text("Send invite")');
         if ((await sendBtn.count()) > 0) {
             await sendBtn.first().click();
-            console.log('   ✅ Send invites clicked!');
         } else {
-            console.log('   ❌ Send invites button not found!');
-
+            console.log(`${tag} ❌ Send invites button not found`);
+            await browser.close();
+            return { email: targetEmail, success: false, reason: 'no_send_button' };
         }
 
-        // ============ Step 6: Wait for toast ============
-        console.log('\n📍 Step 6: Waiting for green toast (max 20s)...');
+        // Step 7: Wait for success toast
+        console.log(`${tag} Step 6: Waiting for success toast...`);
         let success = false;
         for (let i = 0; i < 20; i++) {
             await page.waitForTimeout(1000);
             const pageText = (await page.textContent('body'))?.toLowerCase() || '';
             if (pageText.includes('invited') && pageText.includes('user')) {
-                console.log('   ✅✅✅ SUCCESS! Toast "Invited X user" detected!');
                 success = true;
                 break;
             }
-            process.stdout.write(`   ⏳ ${i + 1}s...`);
         }
 
-        if (!success) {
-            console.log('\n   ❌ No success toast detected after 20s');
-        }
-
-        console.log('\n🏁 RESULT:', success ? '✅ BERHASIL' : '❌ GAGAL');
-
+        await browser.close();
+        console.log(`${tag} ${success ? '✅ BERHASIL' : '❌ GAGAL (no toast)'}`);
+        return { email: targetEmail, success, reason: success ? null : 'no_success_toast' };
 
     } catch (error) {
-        console.error('\n❌ ERROR:', error.message);
+        console.error(`${tag} ❌ ERROR: ${error.message}`);
+        await browser.close();
+        return { email: targetEmail, success: false, reason: error.message };
+    }
+}
 
+// ============ MAIN ============
+async function main() {
+    console.log(`\n🔧 Config:`);
+    console.log(`   Emails  : ${TARGET_EMAILS.join(', ')}`);
+    console.log(`   Proxy   : ${proxyServer || '(none)'}`);
+    console.log(`   Workers : ${TARGET_EMAILS.length} paralel\n`);
+
+    console.log('🔌 Connecting to MongoDB...');
+    await mongoose.connect(MONGODB_URI);
+    console.log('✅ Connected!\n');
+
+    const accounts = await Account.find({ hasSession: true, status: 'active' }).limit(TARGET_EMAILS.length);
+    if (accounts.length === 0) {
+        console.log('❌ Tidak ada akun dengan session aktif.');
+        process.exit(1);
     }
 
-    await browser.close();
+    if (accounts.length < TARGET_EMAILS.length) {
+        console.log(`⚠️  Hanya ada ${accounts.length} akun aktif, tapi ${TARGET_EMAILS.length} email diminta.`);
+        console.log(`   Akan jalankan ${accounts.length} invite saja.\n`);
+    }
+
+    const tasks = TARGET_EMAILS.slice(0, accounts.length).map((email, i) => ({
+        account: accounts[i],
+        email,
+        index: i + 1,
+    }));
+
+    console.log('📋 Tasks:');
+    tasks.forEach(t => console.log(`   [${t.index}] ${t.email} → akun: ${t.account.email}`));
+    console.log('');
+
+    const results = await Promise.all(
+        tasks.map(t => runInvite(t.account, t.email, t.index))
+    );
+
+    console.log('\n' + '═'.repeat(40));
+    console.log('📊 HASIL:');
+    results.forEach(r => {
+        console.log(`  ${r.success ? '✅' : '❌'} ${r.email}${r.reason ? ` — ${r.reason}` : ''}`);
+    });
+    const ok = results.filter(r => r.success).length;
+    console.log(`\n  Total: ${ok}/${results.length} berhasil`);
+    console.log('═'.repeat(40));
+
     await mongoose.disconnect();
-    rl.close();
     console.log('\n👋 Done!');
 }
 

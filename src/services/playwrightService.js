@@ -34,6 +34,22 @@ function getNextProxy() {
 }
 
 /**
+ * Parse proxy string into Playwright proxy config.
+ * Supports: host:port, http://host:port, http://user:pass@host:port
+ */
+function parseProxy(proxyStr) {
+    try {
+        const url = new URL(proxyStr);
+        const config = { server: `${url.protocol}//${url.host}` };
+        if (url.username) config.username = decodeURIComponent(url.username);
+        if (url.password) config.password = decodeURIComponent(url.password);
+        return config;
+    } catch {
+        return { server: proxyStr };
+    }
+}
+
+/**
  * Save screenshot and send to admin via Telegram
  */
 async function sendScreenshotToAdmin(page, label) {
@@ -66,8 +82,10 @@ async function launchBrowser(proxy) {
     };
 
     if (proxy) {
-        launchOptions.proxy = { server: proxy };
-        console.log(`[Playwright] Using proxy: ${proxy}`);
+        launchOptions.proxy = parseProxy(proxy);
+        console.log(`[Playwright] Using proxy: ${launchOptions.proxy.server}${launchOptions.proxy.username ? ' (with auth)' : ''}`);
+    } else {
+        console.warn('[Playwright] No proxy — using direct connection');
     }
 
     return chromium.launch(launchOptions);
@@ -205,7 +223,7 @@ async function inviteTeamMember(account, targetEmail) {
             waitUntil: 'networkidle',
             timeout: 90000,
         });
-        await page.waitForTimeout(8000);
+        await page.waitForTimeout(12000);
 
         const currentUrl = page.url();
         console.log(`[Playwright][${targetEmail}] URL: ${currentUrl}`);
@@ -241,12 +259,12 @@ async function inviteTeamMember(account, targetEmail) {
 
         await inviteBtn.first().click();
         console.log(`[Playwright][${targetEmail}] Invite button clicked`);
-        await page.waitForTimeout(6000);
+        await page.waitForTimeout(12000);
 
         // ============ Step 3: Fill email ============
         console.log(`[Playwright][${targetEmail}] Step 3: Filling email...`);
         let emailFilled = false;
-        for (let attempt = 0; attempt < 15; attempt++) {
+        for (let attempt = 0; attempt < 20; attempt++) {
             const emailInputs = page.locator('input[placeholder="Email"]');
             if ((await emailInputs.count()) > 0) {
                 await emailInputs.first().fill(targetEmail);
@@ -259,8 +277,8 @@ async function inviteTeamMember(account, targetEmail) {
                 emailFilled = true;
                 break;
             }
-            console.log(`[Playwright][${targetEmail}] Email input not found, retrying... (${attempt + 1}/15)`);
-            await page.waitForTimeout(1500);
+            console.log(`[Playwright][${targetEmail}] Email input not found, retrying... (${attempt + 1}/20)`);
+            await page.waitForTimeout(2000);
         }
 
         if (!emailFilled) {
@@ -283,7 +301,7 @@ async function inviteTeamMember(account, targetEmail) {
 
         await nextBtn.first().click();
         console.log(`[Playwright][${targetEmail}] Next clicked`);
-        await page.waitForTimeout(4000);
+        await page.waitForTimeout(6000);
 
         // ============ Step 5: Click "Send invites" ============
         console.log(`[Playwright][${targetEmail}] Step 5: Clicking Send invites...`);
@@ -327,4 +345,4 @@ async function inviteTeamMember(account, targetEmail) {
     }
 }
 
-module.exports = { loginAccount, inviteTeamMember };
+module.exports = { loginAccount, inviteTeamMember, parseProxy };
