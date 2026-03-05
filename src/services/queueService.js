@@ -160,7 +160,7 @@ async function processJob(job) {
             try {
                 const { bot } = require('../bot/userHandlers');
                 await bot.api.sendMessage(telegramId,
-                    `✅ *Invite Berhasil!*\n\n📧 \`${targetEmail}\` sudah diinvite ke ChatGPT Team!`,
+                    `✅ *Invite Berhasil!*\n\n📧 \`${targetEmail}\` sudah diinvite ke ChatGPT Plus!`,
                     { parse_mode: 'Markdown' }
                 );
             } catch (_) { }

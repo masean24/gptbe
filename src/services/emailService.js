@@ -8,42 +8,42 @@ const nodemailer = require('nodemailer');
 let transporter = null;
 
 function initTransporter() {
-    if (transporter) return transporter;
+  if (transporter) return transporter;
 
-    const host = process.env.SMTP_HOST;
-    const port = parseInt(process.env.SMTP_PORT || '587');
-    const user = process.env.SMTP_USER;
-    const pass = process.env.SMTP_PASS;
+  const host = process.env.SMTP_HOST;
+  const port = parseInt(process.env.SMTP_PORT || '587');
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
 
-    if (!host || !user || !pass) {
-        console.warn('[Email] SMTP not configured — email sending disabled');
-        return null;
-    }
+  if (!host || !user || !pass) {
+    console.warn('[Email] SMTP not configured — email sending disabled');
+    return null;
+  }
 
-    transporter = nodemailer.createTransport({
-        host,
-        port,
-        secure: port === 465,
-        auth: { user, pass },
-    });
+  transporter = nodemailer.createTransport({
+    host,
+    port,
+    secure: port === 465,
+    auth: { user, pass },
+  });
 
-    console.log(`[Email] SMTP configured: ${user} via ${host}:${port}`);
-    return transporter;
+  console.log(`[Email] SMTP configured: ${user} via ${host}:${port}`);
+  return transporter;
 }
 
 /**
  * Send a redeem code to user via email
  */
 async function sendRedeemCode(toEmail, code, credits = 1) {
-    const t = initTransporter();
-    if (!t) {
-        console.error('[Email] Cannot send — SMTP not configured');
-        return false;
-    }
+  const t = initTransporter();
+  if (!t) {
+    console.error('[Email] Cannot send — SMTP not configured');
+    return false;
+  }
 
-    const from = process.env.SMTP_FROM || process.env.SMTP_USER;
+  const from = process.env.SMTP_FROM || process.env.SMTP_USER;
 
-    const html = `
+  const html = `
 <!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
@@ -81,7 +81,7 @@ async function sendRedeemCode(toEmail, code, credits = 1) {
     <!-- Footer -->
     <div style="background:#000;border:3px solid #000;padding:16px 32px;text-align:center;">
       <p style="margin:0;font-size:12px;color:#999;">
-        GPT Invite Bot — Akses ChatGPT Team otomatis
+        GPT Invite Bot — Akses ChatGPT Plus otomatis
       </p>
     </div>
     
@@ -89,19 +89,19 @@ async function sendRedeemCode(toEmail, code, credits = 1) {
 </body>
 </html>`;
 
-    try {
-        await t.sendMail({
-            from,
-            to: toEmail,
-            subject: '🎁 Kode Redeem GPT Invite Bot — Kredit Gratis!',
-            html,
-        });
-        console.log(`[Email] Redeem code sent to ${toEmail}`);
-        return true;
-    } catch (err) {
-        console.error(`[Email] Failed to send to ${toEmail}:`, err.message);
-        return false;
-    }
+  try {
+    await t.sendMail({
+      from,
+      to: toEmail,
+      subject: '🎁 Kode Redeem GPT Invite Bot — Kredit Gratis!',
+      html,
+    });
+    console.log(`[Email] Redeem code sent to ${toEmail}`);
+    return true;
+  } catch (err) {
+    console.error(`[Email] Failed to send to ${toEmail}:`, err.message);
+    return false;
+  }
 }
 
 module.exports = { sendRedeemCode, initTransporter };

@@ -118,7 +118,7 @@ bot.command('start', async (ctx) => {
     await ctx.reply(
         `👋 Halo, *${name}!*\n\n` +
         `Selamat datang di *GPT Invite Bot* 🤖\n\n` +
-        `Bot ini membantu kamu mendapatkan akses ke *ChatGPT Team* dengan cara mudah dan otomatis.\n\n` +
+        `Bot ini membantu kamu mendapatkan akses ke *ChatGPT Plus* dengan cara mudah dan otomatis.\n\n` +
         `━━━━━━━━━━━━━━━━━━━━\n` +
         `📌 *Cara pakai:*\n` +
         `1. Beli kredit via QRIS atau tukar Redeem Code\n` +
@@ -139,7 +139,7 @@ bot.command(['menu', 'help'], async (ctx) => {
     const admin = isAdmin(ctx);
     let text = `📋 *MENU UTAMA*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
     text += `🎯 *Invite*\n`;
-    text += `• /gpti \`email@example.com\` — Invite email ke ChatGPT Team\n\n`;
+    text += `• /gpti \`email@example.com\` — Invite email ke ChatGPT Plus\n\n`;
     text += `💰 *Kredit*\n`;
     text += `• /beli — Beli kredit via QRIS\n`;
     text += `• /redeem \`KODE\` — Tukar Redeem Code\n\n`;
@@ -250,7 +250,7 @@ bot.command('beli', async (ctx) => {
 
     await ctx.reply(
         `💰 *BELI KREDIT*\n━━━━━━━━━━━━━━━━━━━━\n\n` +
-        `1 Kredit = 1x Invite ke ChatGPT Team\n` +
+        `1 Kredit = 1x Invite ke ChatGPT Plus\n` +
         `Harga: *Rp ${CREDIT_PRICE.toLocaleString('id-ID')} / kredit*\n\n` +
         `Pilih jumlah kredit yang ingin dibeli:`,
         { parse_mode: 'Markdown', reply_markup: keyboard }

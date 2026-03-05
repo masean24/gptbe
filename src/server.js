@@ -181,7 +181,8 @@ app.get('/api/web/user/dashboard', authMiddleware, webUserMiddleware, async (req
         const recentTxns = await Transaction.find({ telegramId: `webuser_${user._id}` })
             .sort({ createdAt: -1 }).limit(10);
 
-        const activeAccounts = await Account.countDocuments({ status: 'active', $expr: { $lt: ['$inviteCount', '$maxInvites'] } });
+        const seatAgg = await Account.aggregate([{ $match: { status: 'active', $expr: { $lt: ['$inviteCount', '$maxInvites'] } } }, { $group: { _id: null, totalSeats: { $sum: { $subtract: ['$maxInvites', '$inviteCount'] } } } }]);
+        const availableSeats = seatAgg[0]?.totalSeats || 0;
         const pendingJobs = await InviteJob.countDocuments({ status: 'queued' });
 
         res.json({
@@ -196,8 +197,8 @@ app.get('/api/web/user/dashboard', authMiddleware, webUserMiddleware, async (req
             },
             recentTransactions: recentTxns,
             serverStatus: {
-                online: activeAccounts > 0,
-                availableSlots: activeAccounts,
+                online: availableSeats > 0,
+                availableSlots: availableSeats,
                 queueLength: pendingJobs,
                 pricePerInvite: CREDIT_PRICE,
             },
@@ -385,11 +386,12 @@ app.get('/api/web/job/:jobId', async (req, res) => {
 // PUBLIC: Server status
 // =========================================================
 app.get('/api/web/status', async (req, res) => {
-    const activeAccounts = await Account.countDocuments({ status: 'active', $expr: { $lt: ['$inviteCount', '$maxInvites'] } });
+    const seatAgg = await Account.aggregate([{ $match: { status: 'active', $expr: { $lt: ['$inviteCount', '$maxInvites'] } } }, { $group: { _id: null, totalSeats: { $sum: { $subtract: ['$maxInvites', '$inviteCount'] } } } }]);
+    const availableSeats = seatAgg[0]?.totalSeats || 0;
     const pendingJobs = await InviteJob.countDocuments({ status: 'queued' });
     res.json({
-        online: activeAccounts > 0,
-        availableSlots: activeAccounts,
+        online: availableSeats > 0,
+        availableSlots: availableSeats,
         queueLength: pendingJobs,
         pricePerInvite: CREDIT_PRICE,
     });
