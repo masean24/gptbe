@@ -129,14 +129,16 @@ bot.command('start', async (ctx) => {
 
     await ctx.reply(
         `👋 Halo, *${name}!*\n\n` +
-        `Selamat datang di *GPT Invite Bot* 🤖\n\n` +
-        `Bot ini membantu kamu mendapatkan akses ke *ChatGPT Plus* dengan cara mudah dan otomatis.\n\n` +
+        `Selamat datang di *HubifyGPT Bot* 🤖\n` +
+        `by *Hubify ID*\n\n` +
+        `Bot ini membantu kamu mendapatkan akses ke *ChatGPT Plus* dengan cara mudah & otomatis — mulai dari *Rp10.000/invite!*\n\n` +
         `━━━━━━━━━━━━━━━━━━━━\n` +
         `📌 *Cara pakai:*\n` +
-        `1. Beli kredit via QRIS atau tukar Redeem Code\n` +
-        `2. Ketik /gpti lalu email kamu\n` +
-        `3. Tunggu konfirmasi invite masuk ke email!\n` +
-        `━━━━━━━━━━━━━━━━━━━━`,
+        `1️⃣ Beli kredit via QRIS atau tukar Redeem Code\n` +
+        `2️⃣ Ketik /gpti lalu masukkan email kamu\n` +
+        `3️⃣ Tunggu konfirmasi invite masuk ke email!\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n\n` +
+        `Ketik /menu untuk mulai 🚀`,
         { parse_mode: 'Markdown', reply_markup: keyboard }
     );
 });
