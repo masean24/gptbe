@@ -15,6 +15,8 @@ const bot = new Bot(process.env.BOT_TOKEN);
 const ADMIN_IDS = (process.env.ADMIN_IDS || '').split(',').map(id => id.trim()).filter(Boolean);
 const REQUIRED_CHANNEL_ID = process.env.REQUIRED_CHANNEL_ID || '';
 const REQUIRED_GROUP_ID = process.env.REQUIRED_GROUP_ID || '';
+const CHANNEL_INVITE_LINK = process.env.CHANNEL_INVITE_LINK || '';
+const GROUP_INVITE_LINK = process.env.GROUP_INVITE_LINK || '';
 
 function isAdmin(ctx) {
     return ADMIN_IDS.includes(String(ctx.from.id));
@@ -42,19 +44,21 @@ async function forceJoinCheck(ctx) {
 
     if (channelOk && groupOk) return true;
 
-    let text = `⚠️ *Kamu harus join dulu sebelum pakai bot ini!*\n\n`;
-    if (!channelOk && REQUIRED_CHANNEL_ID) {
-        const channelLink = REQUIRED_CHANNEL_ID.startsWith('@')
-            ? `https://t.me/${REQUIRED_CHANNEL_ID.replace('@', '')}`
-            : REQUIRED_CHANNEL_ID;
-        text += `📢 Channel: [Join Channel](${channelLink})\n`;
-    }
-    if (!groupOk && REQUIRED_GROUP_ID) {
-        text += `💬 Group: Hubungi admin untuk link group\n`;
-    }
-    text += `\nSetelah join, coba lagi perintah kamu.`;
+    const name = ctx.from.first_name || 'Kawan';
+    const text = `👋 *Hello ${name}*\n\nAnda harus bergabung di Channel/Grup saya terlebih dahulu untuk menggunakan bot ini.\n\nSilakan Join Channel & Group terlebih dahulu.`;
 
-    await ctx.reply(text, { parse_mode: 'Markdown', link_preview_options: { is_disabled: true } });
+    const keyboard = new InlineKeyboard();
+
+    if (GROUP_INVITE_LINK) keyboard.url('Join Group', GROUP_INVITE_LINK);
+    if (CHANNEL_INVITE_LINK) keyboard.url('Join Channel', CHANNEL_INVITE_LINK);
+    keyboard.row();
+    if (CHANNEL_INVITE_LINK) keyboard.url('Join Channel', CHANNEL_INVITE_LINK);
+    if (GROUP_INVITE_LINK) keyboard.url('Join Group', GROUP_INVITE_LINK);
+
+    await ctx.reply(text, {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard,
+    });
     return false;
 }
 
