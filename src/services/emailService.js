@@ -1,47 +1,30 @@
 /**
- * Email Service — Nodemailer SMTP
+ * Email Service — Brevo (Sendinblue) REST API
  * Sends styled HTML emails (redeem codes, notifications)
+ * Requires env: BREVO_API_KEY, BREVO_SENDER_EMAIL, BREVO_SENDER_NAME (optional)
  */
 
-const nodemailer = require('nodemailer');
+const axios = require('axios');
 
-let transporter = null;
-
-function initTransporter() {
-  if (transporter) return transporter;
-
-  const host = process.env.SMTP_HOST;
-  const port = parseInt(process.env.SMTP_PORT || '587');
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
-
-  if (!host || !user || !pass) {
-    console.warn('[Email] SMTP not configured — email sending disabled');
-    return null;
-  }
-
-  transporter = nodemailer.createTransport({
-    host,
-    port,
-    secure: port === 465,
-    auth: { user, pass },
-  });
-
-  console.log(`[Email] SMTP configured: ${user} via ${host}:${port}`);
-  return transporter;
-}
+const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email';
 
 /**
- * Send a redeem code to user via email
+ * Send a redeem code to user via Brevo transactional email API
  */
 async function sendRedeemCode(toEmail, code, credits = 1) {
-  const t = initTransporter();
-  if (!t) {
-    console.error('[Email] Cannot send — SMTP not configured');
+  const apiKey = process.env.BREVO_API_KEY;
+  if (!apiKey) {
+    console.error('[Email] BREVO_API_KEY not set — email sending disabled');
     return false;
   }
 
-  const from = process.env.SMTP_FROM || process.env.SMTP_USER;
+  const senderEmail = process.env.BREVO_SENDER_EMAIL;
+  if (!senderEmail) {
+    console.error('[Email] BREVO_SENDER_EMAIL not set');
+    return false;
+  }
+
+  const senderName = process.env.BREVO_SENDER_NAME || 'GPT Invite Bot';
 
   const html = `
 <!DOCTYPE html>
@@ -90,18 +73,27 @@ async function sendRedeemCode(toEmail, code, credits = 1) {
 </html>`;
 
   try {
-    await t.sendMail({
-      from,
-      to: toEmail,
-      subject: '🎁 Kode Redeem GPT Invite Bot — Kredit Gratis!',
-      html,
-    });
-    console.log(`[Email] Redeem code sent to ${toEmail}`);
+    await axios.post(
+      BREVO_API_URL,
+      {
+        sender: { email: senderEmail, name: senderName },
+        to: [{ email: toEmail }],
+        subject: '🎁 Kode Redeem GPT Invite Bot — Kredit Gratis!',
+        htmlContent: html,
+      },
+      {
+        headers: {
+          'api-key': apiKey,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+    console.log(`[Email] Redeem code sent to ${toEmail} via Brevo`);
     return true;
   } catch (err) {
-    console.error(`[Email] Failed to send to ${toEmail}:`, err.message);
+    console.error(`[Email] Brevo failed to send to ${toEmail}:`, err.response?.data || err.message);
     return false;
   }
 }
 
-module.exports = { sendRedeemCode, initTransporter };
+module.exports = { sendRedeemCode };
