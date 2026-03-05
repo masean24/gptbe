@@ -5,6 +5,7 @@ const Account = require('../models/Account');
 const RedeemCode = require('../models/RedeemCode');
 const Transaction = require('../models/Transaction');
 const InviteJob = require('../models/InviteJob');
+const Settings = require('../models/Settings');
 const { loginAccount } = require('../services/playwrightService');
 
 const ADMIN_IDS = (process.env.ADMIN_IDS || '').split(',').map(id => id.trim()).filter(Boolean);
@@ -43,13 +44,18 @@ async function showAdminMenu(ctx) {
     const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
     const todayInvites = await Transaction.countDocuments({ type: 'invite_used', createdAt: { $gte: todayStart } });
 
+    const freeCreditBot = await Settings.getValue('free_credit_bot', true);
+    const freeCreditWeb = await Settings.getValue('free_credit_web', true);
+
     const keyboard = new InlineKeyboard()
         .text('👥 List Users', 'adm_listusers').row()
         .text('🏦 Akun ChatGPT', 'adm_listaccounts').row()
         .text('🎫 Generate Kode', 'adm_gencode').row()
         .text('💎 Beri Kredit', 'adm_addcredit').row()
         .text('📢 Broadcast', 'adm_broadcast').row()
-        .text('📊 Statistik', 'adm_stats');
+        .text('📊 Statistik', 'adm_stats').row()
+        .text(`🤖 Free Credit Bot: ${freeCreditBot ? '✅ ON' : '❌ OFF'}`, 'toggle_free_credit_bot').row()
+        .text(`🌐 Free Credit Web: ${freeCreditWeb ? '✅ ON' : '❌ OFF'}`, 'toggle_free_credit_web');
 
     const text =
         `👑 *ADMIN PANEL*\n━━━━━━━━━━━━━━━━━━━━\n\n` +
@@ -371,6 +377,21 @@ function registerAdminHandlers(bot) {
             `✅ *Broadcast Selesai!*\n\n📤 Terkirim: ${sent}\n❌ Gagal: ${failed}`,
             { parse_mode: 'Markdown' }
         );
+    }));
+
+    // ---- TOGGLE FREE CREDIT ----
+    bot.callbackQuery('toggle_free_credit_bot', adminOnly(async (ctx) => {
+        const current = await Settings.getValue('free_credit_bot', true);
+        await Settings.setValue('free_credit_bot', !current, String(ctx.from.id));
+        await ctx.answerCallbackQuery(`Free Credit Bot: ${!current ? 'ON' : 'OFF'}`);
+        await showAdminMenu(ctx);
+    }));
+
+    bot.callbackQuery('toggle_free_credit_web', adminOnly(async (ctx) => {
+        const current = await Settings.getValue('free_credit_web', true);
+        await Settings.setValue('free_credit_web', !current, String(ctx.from.id));
+        await ctx.answerCallbackQuery(`Free Credit Web: ${!current ? 'ON' : 'OFF'}`);
+        await showAdminMenu(ctx);
     }));
 
     // ---- BACK BUTTON ----

@@ -4,6 +4,7 @@ const User = require('../models/User');
 const Account = require('../models/Account');
 const RedeemCode = require('../models/RedeemCode');
 const Transaction = require('../models/Transaction');
+const Settings = require('../models/Settings');
 const { enqueue } = require('../services/queueService');
 const { createPayment, checkPayment, CREDIT_PRICE } = require('../services/qrisService');
 const { loginAccount } = require('../services/playwrightService');
@@ -12,9 +13,49 @@ const { generateCodes } = require('./adminHandlers');
 const bot = new Bot(process.env.BOT_TOKEN);
 
 const ADMIN_IDS = (process.env.ADMIN_IDS || '').split(',').map(id => id.trim()).filter(Boolean);
+const REQUIRED_CHANNEL_ID = process.env.REQUIRED_CHANNEL_ID || '';
+const REQUIRED_GROUP_ID = process.env.REQUIRED_GROUP_ID || '';
 
 function isAdmin(ctx) {
     return ADMIN_IDS.includes(String(ctx.from.id));
+}
+
+// =========================================================
+// Force Join Check
+// =========================================================
+async function checkMembership(ctx, chatId) {
+    if (!chatId) return true; // not configured = skip
+    try {
+        const member = await bot.api.getChatMember(chatId, ctx.from.id);
+        return ['member', 'administrator', 'creator'].includes(member.status);
+    } catch (err) {
+        console.error(`[ForceJoin] Error checking ${chatId}:`, err.message);
+        return false; // assume not joined on error
+    }
+}
+
+async function forceJoinCheck(ctx) {
+    if (isAdmin(ctx)) return true; // admin bypass
+
+    const channelOk = await checkMembership(ctx, REQUIRED_CHANNEL_ID);
+    const groupOk = await checkMembership(ctx, REQUIRED_GROUP_ID);
+
+    if (channelOk && groupOk) return true;
+
+    let text = `⚠️ *Kamu harus join dulu sebelum pakai bot ini!*\n\n`;
+    if (!channelOk && REQUIRED_CHANNEL_ID) {
+        const channelLink = REQUIRED_CHANNEL_ID.startsWith('@')
+            ? `https://t.me/${REQUIRED_CHANNEL_ID.replace('@', '')}`
+            : REQUIRED_CHANNEL_ID;
+        text += `📢 Channel: [Join Channel](${channelLink})\n`;
+    }
+    if (!groupOk && REQUIRED_GROUP_ID) {
+        text += `💬 Group: Hubungi admin untuk link group\n`;
+    }
+    text += `\nSetelah join, coba lagi perintah kamu.`;
+
+    await ctx.reply(text, { parse_mode: 'Markdown', link_preview_options: { is_disabled: true } });
+    return false;
 }
 
 // =========================================================
@@ -42,6 +83,38 @@ bot.use(async (ctx, next) => {
 // =========================================================
 bot.command('start', async (ctx) => {
     const name = ctx.from.first_name || 'Kawan';
+    const telegramId = String(ctx.from.id);
+
+    // Check force join (but still show start message)
+    const joined = await forceJoinCheck(ctx);
+    if (!joined) return;
+
+    // Free credit for first-time user
+    try {
+        const freeCreditEnabled = await Settings.getValue('free_credit_bot', true);
+        if (freeCreditEnabled) {
+            const user = await User.findOne({ telegramId });
+            if (user && user.credits === 0 && user.totalInvites === 0) {
+                // First time user, give 1 free credit
+                user.credits += 1;
+                await user.save();
+                await Transaction.create({
+                    telegramId,
+                    type: 'admin_gift',
+                    credits: 1,
+                    description: 'Free credit — welcome bonus',
+                });
+                await ctx.reply(
+                    `🎁 *Selamat! Kamu dapat 1 kredit gratis!*\n\n` +
+                    `Langsung pakai dengan /gpti email@example.com`,
+                    { parse_mode: 'Markdown' }
+                );
+            }
+        }
+    } catch (err) {
+        console.error('[Start] Free credit error:', err.message);
+    }
+
     await ctx.reply(
         `👋 Halo, *${name}!*\n\n` +
         `Selamat datang di *GPT Invite Bot* 🤖\n\n` +
@@ -61,6 +134,8 @@ bot.command('start', async (ctx) => {
 // /menu
 // =========================================================
 bot.command(['menu', 'help'], async (ctx) => {
+    if (!(await forceJoinCheck(ctx))) return;
+
     const admin = isAdmin(ctx);
     let text = `📋 *MENU UTAMA*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
     text += `🎯 *Invite*\n`;
@@ -84,6 +159,8 @@ bot.command(['menu', 'help'], async (ctx) => {
 // /status
 // =========================================================
 bot.command('status', async (ctx) => {
+    if (!(await forceJoinCheck(ctx))) return;
+
     const user = await User.findOne({ telegramId: String(ctx.from.id) });
     if (!user) return ctx.reply('User tidak ditemukan. Coba /start dulu.');
 
@@ -110,6 +187,8 @@ bot.command('status', async (ctx) => {
 // /gpti - Request invite
 // =========================================================
 bot.command('gpti', async (ctx) => {
+    if (!(await forceJoinCheck(ctx))) return;
+
     const args = ctx.message.text.split(' ');
     if (args.length < 2 || !args[1].includes('@')) {
         return ctx.reply(
@@ -157,6 +236,8 @@ bot.command('gpti', async (ctx) => {
 // /beli - Buy credits via QRIS
 // =========================================================
 bot.command('beli', async (ctx) => {
+    if (!(await forceJoinCheck(ctx))) return;
+
     const p = (n) => (n * CREDIT_PRICE).toLocaleString('id-ID');
     const keyboard = new InlineKeyboard()
         .text(`1 Kredit — Rp ${p(1)}`, 'buy_1')
@@ -203,7 +284,6 @@ bot.callbackQuery(/^buy_(\d+)$/, async (ctx) => {
 
         await ctx.api.deleteMessage(chatId, msg.message_id).catch(() => { });
 
-        // Try generating QR image, fallback to text QRIS
         let qrisMessageId = null;
         try {
             const { InputFile } = require('grammy');
@@ -223,7 +303,6 @@ bot.callbackQuery(/^buy_(\d+)$/, async (ctx) => {
             qrisMessageId = qrisMsg.message_id;
         }
 
-        // Poll for payment for 15 minutes
         startPaymentPoller(chatId, telegramId, payment.transactionId, creditsToBuy, qrisMessageId);
     } catch (err) {
         console.error('[Buy] Error creating payment:', err.message);
@@ -232,7 +311,7 @@ bot.callbackQuery(/^buy_(\d+)$/, async (ctx) => {
 });
 
 async function startPaymentPoller(chatId, telegramId, transactionId, credits, qrisMessageId) {
-    const maxAttempts = 90; // 15 minutes (10s interval)
+    const maxAttempts = 90;
     let attempt = 0;
 
     const deleteQris = async () => {
@@ -243,7 +322,6 @@ async function startPaymentPoller(chatId, telegramId, transactionId, credits, qr
 
     const poll = async () => {
         if (attempt >= maxAttempts) {
-            // Expired — delete QRIS message
             await deleteQris();
             await bot.api.sendMessage(telegramId, '⚠️ QRIS kamu sudah expired. Silakan /beli lagi untuk membuat QRIS baru.').catch(() => { });
             return;
@@ -252,7 +330,6 @@ async function startPaymentPoller(chatId, telegramId, transactionId, credits, qr
         try {
             const txn = await checkPayment(transactionId);
             if (txn?.status === 'paid') {
-                // Delete QRIS message & send success
                 await deleteQris();
                 await bot.api.sendMessage(telegramId,
                     `✅ *Pembayaran Diterima!*\n\n` +
@@ -275,11 +352,12 @@ async function startPaymentPoller(chatId, telegramId, transactionId, credits, qr
     setTimeout(poll, 10000);
 }
 
-
 // =========================================================
 // /redeem - Redeem a code
 // =========================================================
 bot.command('redeem', async (ctx) => {
+    if (!(await forceJoinCheck(ctx))) return;
+
     const args = ctx.message.text.split(' ');
     if (args.length < 2) {
         return ctx.reply('❌ Format: `/redeem KODE-ANDA`', { parse_mode: 'Markdown' });
@@ -293,18 +371,15 @@ bot.command('redeem', async (ctx) => {
         return ctx.reply('❌ *Kode tidak valid atau sudah digunakan!*', { parse_mode: 'Markdown' });
     }
 
-    // Check expiry
     if (code.expiresAt && new Date() > code.expiresAt) {
         return ctx.reply('❌ *Kode sudah kedaluwarsa.*', { parse_mode: 'Markdown' });
     }
 
-    // Mark code as used
     code.isUsed = true;
     code.usedBy = telegramId;
     code.usedAt = new Date();
     await code.save();
 
-    // Add credits
     const user = await User.findOneAndUpdate(
         { telegramId },
         { $inc: { credits: code.credits } },
@@ -333,6 +408,8 @@ bot.command('redeem', async (ctx) => {
 // /riwayat - Transaction history
 // =========================================================
 bot.command('riwayat', async (ctx) => {
+    if (!(await forceJoinCheck(ctx))) return;
+
     const telegramId = String(ctx.from.id);
     const txns = await Transaction.find({ telegramId }).sort({ createdAt: -1 }).limit(10);
 
@@ -350,6 +427,6 @@ bot.command('riwayat', async (ctx) => {
 });
 
 // =========================================================
-// Export bot (main.js will call bot.start())
+// Export bot
 // =========================================================
 module.exports = { bot, isAdmin };

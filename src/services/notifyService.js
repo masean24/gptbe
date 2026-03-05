@@ -1,9 +1,10 @@
 /**
  * Telegram Channel/Group Notification Service
- * Sends webhook notifications to admin channel for important events
+ * Supports forum group topics via LOG_TOPIC_ID
  */
 
-const LOG_CHAT_ID = process.env.LOG_CHAT_ID; // channel or group chat ID e.g. -1001234567890
+const LOG_CHAT_ID = process.env.LOG_CHAT_ID;
+const LOG_TOPIC_ID = process.env.LOG_TOPIC_ID ? parseInt(process.env.LOG_TOPIC_ID) : null;
 
 let _bot = null;
 
@@ -14,7 +15,9 @@ function setBot(bot) {
 async function notify(text) {
     if (!_bot || !LOG_CHAT_ID) return;
     try {
-        await _bot.api.sendMessage(LOG_CHAT_ID, text, { parse_mode: 'Markdown' });
+        const opts = { parse_mode: 'Markdown' };
+        if (LOG_TOPIC_ID) opts.message_thread_id = LOG_TOPIC_ID;
+        await _bot.api.sendMessage(LOG_CHAT_ID, text, opts);
     } catch (err) {
         console.error('[Notify] Failed to send to channel:', err.message);
     }
@@ -71,6 +74,15 @@ async function notifyNewWebOrder(email, method) {
     );
 }
 
+async function notifyNewWebRegistration(email) {
+    await notify(
+        `👤 *USER WEB BARU DAFTAR*\n━━━━━━━━━━━━━━━━━━━━\n\n` +
+        `📧 Email: \`${email}\`\n` +
+        `⏳ Menunggu approval admin\n` +
+        `🕐 ${new Date().toLocaleString('id-ID')}`
+    );
+}
+
 module.exports = {
     setBot,
     notify,
@@ -79,4 +91,5 @@ module.exports = {
     notifyRedeemUsed,
     notifyPaymentReceived,
     notifyNewWebOrder,
+    notifyNewWebRegistration,
 };
