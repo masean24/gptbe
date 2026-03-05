@@ -8,17 +8,27 @@ chromium.use(StealthPlugin());
 const ADMIN_IDS = (process.env.ADMIN_IDS || '').split(',').map(id => id.trim()).filter(Boolean);
 
 // ============ PROXY POOL ============
-const PROXY_LIST = (process.env.PROXY_LIST || '')
-    .split(',')
-    .map(p => p.trim())
-    .filter(Boolean)
-    .map(p => (p.startsWith('http') ? p : `http://${p}`));
+const path = require('path');
+const PROXY_FILE = path.join(__dirname, '../../proxy-list.txt');
+
+function loadProxies() {
+    try {
+        return fs.readFileSync(PROXY_FILE, 'utf-8')
+            .split('\n')
+            .map(l => l.trim())
+            .filter(l => l && !l.startsWith('#'))
+            .map(p => (p.startsWith('http') ? p : `http://${p}`));
+    } catch {
+        return [];
+    }
+}
 
 let proxyIndex = 0;
 
 function getNextProxy() {
-    if (PROXY_LIST.length === 0) return null;
-    const proxy = PROXY_LIST[proxyIndex % PROXY_LIST.length];
+    const proxies = loadProxies();
+    if (proxies.length === 0) return null;
+    const proxy = proxies[proxyIndex % proxies.length];
     proxyIndex++;
     return proxy;
 }
