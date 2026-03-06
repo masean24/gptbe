@@ -85,7 +85,6 @@ async function launchBrowser(proxy) {
             '--disable-dev-shm-usage',   // fix blank page di VPS (/dev/shm kecil)
             '--disable-gpu',
             '--no-zygote',
-            '--single-process',
         ],
     };
 
@@ -151,7 +150,9 @@ async function loginAccount(account) {
         console.log(`[Login][${account.email}] Step 1: Navigating to chatgpt.com...`);
         await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
         await randomDelay(5000, 8000);
+        await sendScreenshotToAdmin(page, `login_1_loaded_${account.email.split('@')[0]}`);
 
+        console.log(`[Login][${account.email}] Step 1: URL after load: ${page.url()}`);
         console.log(`[Login][${account.email}] Step 1: Clicking Log in button...`);
         await page.click('button:has-text("Log in")');
         await randomDelay(3000, 5000);
@@ -169,6 +170,7 @@ async function loginAccount(account) {
         // Jika ada, klik "Continue with password" dulu
         const urlAfterEmail = page.url();
         console.log(`[Login][${account.email}] Step 3: URL after email: ${urlAfterEmail}`);
+        await sendScreenshotToAdmin(page, `login_3_after_email_${account.email.split('@')[0]}`);
         if (urlAfterEmail.includes('email-verification')) {
             console.log(`[Login][${account.email}] Step 3: Email verification page detected, clicking Continue with password...`);
             await page.click('button:has-text("Continue with password")');
