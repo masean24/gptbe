@@ -135,8 +135,8 @@ async function dismissPopups(page) {
  * Login to ChatGPT and save session as JSON string (for MongoDB storage)
  */
 async function loginAccount(account) {
-    const proxy = getNextProxy();
-    const browser = await launchBrowser(proxy);
+    // Login tanpa proxy — lebih stabil, proxy hanya untuk invite
+    const browser = await launchBrowser(null);
     const context = await browser.newContext({
         viewport: { width: 1280, height: 720 },
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
