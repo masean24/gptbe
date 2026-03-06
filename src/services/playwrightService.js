@@ -78,7 +78,15 @@ async function sendScreenshotToAdmin(page, label) {
 async function launchBrowser(proxy) {
     const launchOptions = {
         headless: true,
-        args: ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-setuid-sandbox'],
+        args: [
+            '--disable-blink-features=AutomationControlled',
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',   // fix blank page di VPS (/dev/shm kecil)
+            '--disable-gpu',
+            '--no-zygote',
+            '--single-process',
+        ],
     };
 
     if (proxy) {
