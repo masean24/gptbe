@@ -157,7 +157,17 @@ async function loginAccount(account) {
         await page.click('button[type="submit"]:has-text("Continue")');
         await randomDelay(4000, 6000);
 
-        // Step 3: Halaman auth.openai.com/log-in/password → isi password → klik Continue
+        // Step 3: Cek apakah ada halaman email-verification (Check your inbox)
+        // Jika ada, klik "Continue with password" dulu
+        const urlAfterEmail = page.url();
+        console.log(`[Login][${account.email}] Step 3: URL after email: ${urlAfterEmail}`);
+        if (urlAfterEmail.includes('email-verification')) {
+            console.log(`[Login][${account.email}] Step 3: Email verification page detected, clicking Continue with password...`);
+            await page.click('button:has-text("Continue with password")');
+            await randomDelay(3000, 5000);
+        }
+
+        // Step 3b: Isi password → klik Continue
         console.log(`[Login][${account.email}] Step 3: Filling password...`);
         const passwordInput = await page.waitForSelector('input[type="password"], input[placeholder="Password"]', { timeout: 30000 });
         await randomDelay(1000, 2000);
@@ -203,12 +213,16 @@ async function loginAccount(account) {
         const currentUrl = page.url();
         console.log(`[Login][${account.email}] Final URL: ${currentUrl}`);
         const isLoggedIn = currentUrl.includes('chatgpt.com') && !currentUrl.includes('auth');
-        if (!isLoggedIn) throw new Error('Login gagal - URL masih di halaman auth: ' + currentUrl);
+        if (!isLoggedIn) {
+            await sendScreenshotToAdmin(page, `login_failed_${account.email.split('@')[0]}`);
+            throw new Error('Login gagal - URL masih di halaman auth: ' + currentUrl);
+        }
 
         const sessionData = await context.storageState();
         await browser.close();
         return { success: true, sessionData: JSON.stringify(sessionData) };
     } catch (error) {
+        try { await sendScreenshotToAdmin(page, `login_error_${account.email.split('@')[0]}`); } catch (_) { }
         try { await browser.close(); } catch (_) { }
         return { success: false, message: error.message };
     }

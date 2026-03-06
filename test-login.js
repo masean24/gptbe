@@ -104,7 +104,16 @@ async function runLogin(account) {
         await page.click('button[type="submit"]:has-text("Continue")');
         await randomDelay(4000, 6000);
 
-        // Step 3: auth.openai.com/log-in/password → isi password → klik Continue
+        // Step 3: Cek apakah ada halaman email-verification (Check your inbox)
+        const urlAfterEmail = page.url();
+        console.log(`${tag} Step 3: URL after email: ${urlAfterEmail}`);
+        if (urlAfterEmail.includes('email-verification')) {
+            console.log(`${tag} Step 3: Email verification page detected! Clicking "Continue with password"...`);
+            await page.click('button:has-text("Continue with password")');
+            await randomDelay(3000, 5000);
+        }
+
+        // Step 3b: isi password → klik Continue
         console.log(`${tag} Step 3: Waiting for password field...`);
         console.log(`${tag} URL: ${page.url()}`);
         const passwordInput = await page.waitForSelector('input[type="password"], input[placeholder="Password"]', { timeout: 30000 });
@@ -172,6 +181,12 @@ async function runLogin(account) {
 
     } catch (error) {
         console.error(`${tag} ❌ ERROR: ${error.message}`);
+        // Screenshot saat error
+        try {
+            const ssPath = `./debug-login-${Date.now()}.png`;
+            await page.screenshot({ path: ssPath, fullPage: true });
+            console.log(`${tag} Screenshot saved: ${ssPath}`);
+        } catch (_) { }
         // Jangan langsung close, biar user bisa inspect browser
         console.log(`${tag} Browser tetap terbuka 30 detik biar bisa inspect...`);
         await page.waitForTimeout(30000);
