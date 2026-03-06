@@ -137,41 +137,60 @@ async function loginAccount(account) {
     const page = await context.newPage();
 
     try {
-        await page.goto('https://chat.openai.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
-        await page.waitForTimeout(5000);
+        const randomDelay = (min, max) => page.waitForTimeout(Math.floor(Math.random() * (max - min + 1)) + min);
 
+        // Step 1: Buka chatgpt.com dan klik "Log in" (kanan atas)
+        console.log(`[Login][${account.email}] Step 1: Navigating to chatgpt.com...`);
+        await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await randomDelay(5000, 8000);
+
+        console.log(`[Login][${account.email}] Step 1: Clicking Log in button...`);
         await page.click('button:has-text("Log in")');
-        await page.waitForTimeout(3000);
+        await randomDelay(3000, 5000);
 
-        await page.waitForSelector('input[type="email"]', { timeout: 15000 });
-        await page.fill('input[type="email"]', account.email);
-        await page.click('button.btn-primary[type="submit"]');
-        await page.waitForTimeout(3000);
+        // Step 2: Popup "Log in or sign up" → isi email → klik Continue
+        console.log(`[Login][${account.email}] Step 2: Filling email...`);
+        await page.waitForSelector('input[placeholder="Email address"]', { timeout: 15000 });
+        await randomDelay(1000, 2000);
+        await page.fill('input[placeholder="Email address"]', account.email);
+        await randomDelay(1500, 3000);
+        await page.click('button[type="submit"]:has-text("Continue")');
+        await randomDelay(4000, 6000);
 
-        const passwordInput = await page.waitForSelector('input[type="password"]');
+        // Step 3: Halaman auth.openai.com/log-in/password → isi password → klik Continue
+        console.log(`[Login][${account.email}] Step 3: Filling password...`);
+        const passwordInput = await page.waitForSelector('input[type="password"], input[placeholder="Password"]', { timeout: 30000 });
+        await randomDelay(1000, 2000);
         await passwordInput.fill(account.password);
-        await page.click('button[type="submit"]');
-        await page.waitForTimeout(5000);
+        await randomDelay(1500, 3000);
+        await page.click('button:has-text("Continue")');
+        await randomDelay(5000, 8000);
 
-        // Handle 2FA
-        const has2FA = await page.locator('input[type="text"][autocomplete="one-time-code"], input[name="code"]').count() > 0;
-        if (has2FA && account.twoFASecret) {
+        // Step 4: Handle 2FA (auth.openai.com/mfa-challenge/...)
+        const currentUrlAfterPassword = page.url();
+        if (currentUrlAfterPassword.includes('mfa-challenge')) {
+            console.log(`[Login][${account.email}] Step 4: 2FA detected...`);
+            if (!account.twoFASecret) throw new Error('Akun memiliki 2FA tapi twoFASecret tidak diisi di database');
             const token = speakeasy.totp({ secret: account.twoFASecret, encoding: 'base32' });
-            const codeInput = await page.waitForSelector('input[type="text"][autocomplete="one-time-code"], input[name="code"]');
+            const codeInput = await page.waitForSelector('input[placeholder="One-time code"], input[placeholder="Code"]', { timeout: 15000 });
+            await randomDelay(1000, 2000);
             await codeInput.fill(token);
-            await page.click('button[type="submit"], button:has-text("Continue"), button:has-text("Verify")');
-            await page.waitForTimeout(3000);
+            await randomDelay(1500, 3000);
+            await page.click('button:has-text("Continue")');
+            await randomDelay(5000, 8000);
         }
 
+        // Tunggu redirect ke chatgpt.com
         try {
-            await page.waitForURL(/chatgpt\.com|auth\.openai\.com\/workspace/, { timeout: 60000 });
+            await page.waitForURL(/chatgpt\.com/, { timeout: 60000 });
         } catch (_) { }
 
         await page.waitForTimeout(5000);
 
-        // Handle workspace selection
+        // Handle workspace selection (jika ada)
         const workspaceBtn = await page.locator('button[name="workspace_id"]').count() > 0;
         if (workspaceBtn) {
+            console.log(`[Login][${account.email}] Selecting workspace...`);
             const firstBtn = page.locator('button[name="workspace_id"]').first();
             await firstBtn.click({ force: true });
             try { await page.waitForURL(/chatgpt\.com/, { timeout: 60000 }); } catch (_) { }
@@ -182,8 +201,9 @@ async function loginAccount(account) {
         await dismissPopups(page);
 
         const currentUrl = page.url();
-        const isLoggedIn = currentUrl.includes('chatgpt.com') && !currentUrl.includes('auth') && !currentUrl.includes('workspace');
-        if (!isLoggedIn) throw new Error('Login gagal - URL masih di halaman auth');
+        console.log(`[Login][${account.email}] Final URL: ${currentUrl}`);
+        const isLoggedIn = currentUrl.includes('chatgpt.com') && !currentUrl.includes('auth');
+        if (!isLoggedIn) throw new Error('Login gagal - URL masih di halaman auth: ' + currentUrl);
 
         const sessionData = await context.storageState();
         await browser.close();

@@ -29,7 +29,6 @@ Buka terminal VPS (SSH), jalankan satu-satu:
 
 ```bash
 sudo apt update && sudo apt upgrade -y
-sudo apt install git curl -y
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
 sudo apt install -y nodejs
 sudo npm install -g pm2
@@ -151,7 +150,7 @@ Isi dengan:
 server {
     listen 80;
     listen 443 ssl;
-    server_name gpts.domainmu.com;
+    server_name gpts.hubify.store;
 
     ssl_certificate /etc/ssl/cloudflare/cert.pem;
     ssl_certificate_key /etc/ssl/cloudflare/key.pem;
@@ -198,7 +197,7 @@ sudo ufw enable
 
 ### G. Test
 
-Buka di browser: `https://gpts.domainmu.com/health`
+Buka di browser: `https://gpts.hubify.store/health`
 
 Harus muncul: `{"status":"ok"}` ✅
 
