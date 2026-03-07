@@ -24,6 +24,9 @@ function isAdmin(ctx) {
     return ADMIN_IDS.includes(String(ctx.from.id));
 }
 
+// Helper: "Kembali ke Menu" inline keyboard
+const menuKeyboard = new InlineKeyboard().text('📋 Kembali ke Menu', 'user_menu');
+
 // =========================================================
 // Force Join Check
 // =========================================================
@@ -112,8 +115,8 @@ bot.command('start', async (ctx) => {
                 });
                 await ctx.reply(
                     `🎁 *Selamat! Kamu dapat 1 kredit gratis!*\n\n` +
-                    `Langsung pakai dengan /gpti email@example.com`,
-                    { parse_mode: 'Markdown' }
+                    `Langsung pakai dengan /invite email@example.com`,
+                    { parse_mode: 'Markdown', reply_markup: menuKeyboard }
                 );
             }
         }
@@ -133,11 +136,11 @@ bot.command('start', async (ctx) => {
         `👋 Halo, *${name}!*\n\n` +
         `Selamat datang di *HubifyGPT Bot* 🤖\n` +
         `by *Hubify ID*\n\n` +
-        `Bot ini membantu kamu mendapatkan akses ke *ChatGPT Plus* dengan cara mudah & otomatis — mulai dari *Rp10.000/invite!*\n\n` +
+        `Bot ini membantu kamu mendapatkan akses ke *ChatGPT Plus* dengan cara mudah & otomatis — mulai dari *Rp5.000/invite!*\n\n` +
         `━━━━━━━━━━━━━━━━━━━━\n` +
         `📌 *Cara pakai:*\n` +
         `1️⃣ Beli kredit via QRIS atau tukar Redeem Code\n` +
-        `2️⃣ Ketik /gpti lalu masukkan email kamu\n` +
+        `2️⃣ Ketik /invite lalu masukkan email kamu\n` +
         `3️⃣ Tunggu konfirmasi invite masuk ke email!\n` +
         `━━━━━━━━━━━━━━━━━━━━\n\n` +
         `Ketik /menu untuk mulai 🚀`,
@@ -156,12 +159,13 @@ bot.command(['menu', 'help'], async (ctx) => {
         `📋 *MENU — HubifyGPT Bot*\n` +
         `━━━━━━━━━━━━━━━━━━━━\n\n` +
         `🎯 *Invite ChatGPT Plus*\n` +
-        `  /gpti \`email@kamu.com\`\n\n` +
+        `  /invite \`email@kamu.com\`\n\n` +
         `💰 *Kredit*\n` +
         `  /beli — Beli kredit via QRIS\n` +
         `  /redeem \`KODE\` — Tukar Redeem Code\n\n` +
         `📊 *Akun*\n` +
         `  /status — Saldo & info kamu\n` +
+        `  /garansi — Cek & claim garansi\n` +
         `  /riwayat — Riwayat transaksi\n` +
         `━━━━━━━━━━━━━━━━━━━━`;
 
@@ -182,12 +186,13 @@ bot.callbackQuery('user_menu', async (ctx) => {
         `📋 *MENU — HubifyGPT Bot*\n` +
         `━━━━━━━━━━━━━━━━━━━━\n\n` +
         `🎯 *Invite ChatGPT Plus*\n` +
-        `  /gpti \`email@kamu.com\`\n\n` +
+        `  /invite \`email@kamu.com\`\n\n` +
         `💰 *Kredit*\n` +
         `  /beli — Beli kredit via QRIS\n` +
         `  /redeem \`KODE\` — Tukar Redeem Code\n\n` +
         `📊 *Akun*\n` +
         `  /status — Saldo & info kamu\n` +
+        `  /garansi — Cek & claim garansi\n` +
         `  /riwayat — Riwayat transaksi\n` +
         `━━━━━━━━━━━━━━━━━━━━`;
 
@@ -226,21 +231,21 @@ bot.command('status', async (ctx) => {
         `━━━━━━━━━━━━━━━━━━━━\n` +
         `🤖 Server: ${activeAccounts > 0 ? `✅ Online (${activeAccounts} akun aktif)` : '⚠️ Sedang maintenance'}\n\n` +
         `▸ /beli — tambah kredit\n` +
-        `▸ /gpti email@gmail.com — invite sekarang`,
-        { parse_mode: 'Markdown' }
+        `▸ /invite email@gmail.com — invite sekarang`,
+        { parse_mode: 'Markdown', reply_markup: menuKeyboard }
     );
 });
 
 // =========================================================
-// /gpti - Request invite
+// /invite - Request invite (also accepts /gpti for backward compat)
 // =========================================================
-bot.command('gpti', async (ctx) => {
+bot.command(['invite', 'gpti'], async (ctx) => {
     if (!(await forceJoinCheck(ctx))) return;
 
     const args = ctx.message.text.split(' ');
     if (args.length < 2 || !args[1].includes('@')) {
         return ctx.reply(
-            '❌ Format salah!\n\n✅ Contoh:\n`/gpti john@gmail.com`',
+            '❌ Format salah!\n\n✅ Contoh:\n`/invite john@gmail.com`',
             { parse_mode: 'Markdown' }
         );
     }
@@ -257,7 +262,7 @@ bot.command('gpti', async (ctx) => {
             `Pilih cara topup:\n` +
             `• /beli — Bayar via QRIS\n` +
             `• /redeem KODE — Tukar Redeem Code`,
-            { parse_mode: 'Markdown' }
+            { parse_mode: 'Markdown', reply_markup: menuKeyboard }
         );
     }
 
@@ -285,7 +290,7 @@ bot.command('gpti', async (ctx) => {
         } else {
             msg += `\n🔄 Sedang diproses sekarang...\nKamu akan mendapat notifikasi hasilnya.`;
         }
-        await ctx.api.editMessageText(ctx.chat.id, processing.message_id, msg, { parse_mode: 'Markdown' });
+        await ctx.api.editMessageText(ctx.chat.id, processing.message_id, msg, { parse_mode: 'Markdown', reply_markup: menuKeyboard });
     } else {
         // Multiple tiers available, let user pick
         const keyboard = new InlineKeyboard();
@@ -324,7 +329,7 @@ bot.callbackQuery(/^invite_tier_(basic|standard|premium)_(.+)$/, async (ctx) => 
     } else {
         msg += `\n🔄 Sedang diproses sekarang...\nKamu akan mendapat notifikasi hasilnya.`;
     }
-    await ctx.api.editMessageText(ctx.chat.id, processing.message_id, msg, { parse_mode: 'Markdown' });
+    await ctx.api.editMessageText(ctx.chat.id, processing.message_id, msg, { parse_mode: 'Markdown', reply_markup: menuKeyboard });
 });
 
 // =========================================================
@@ -347,7 +352,7 @@ bot.command('garansi', async (ctx) => {
             `Kamu belum punya invite dengan garansi.\n\n` +
             `Garansi tersedia untuk tier *Standard* (14 hari) dan *Premium* (30 hari).\n` +
             `Gunakan /beli untuk membeli kredit bergaransi.`,
-            { parse_mode: 'Markdown' }
+            { parse_mode: 'Markdown', reply_markup: menuKeyboard }
         );
     }
 
@@ -372,6 +377,8 @@ bot.command('garansi', async (ctx) => {
     }
 
     text += `\n_Tekan tombol di bawah untuk claim garansi jika akses ChatGPT Plus hilang._`;
+
+    keyboard.row().text('📋 Kembali ke Menu', 'user_menu');
 
     if (claimable > 0) {
         await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: keyboard });
@@ -405,7 +412,7 @@ bot.callbackQuery(/^claim_guarantee_(.+)$/, async (ctx) => {
             `📧 Email: \`${job.targetEmail}\`\n` +
             `🛡️ Tier: ${job.tier}\n\n` +
             `Admin akan segera memproses re-invite kamu. Tunggu notifikasi ya!`,
-            { parse_mode: 'Markdown' }
+            { parse_mode: 'Markdown', reply_markup: menuKeyboard }
         );
     } catch (err) {
         console.error('[Garansi] Error:', err.message);
@@ -442,6 +449,23 @@ bot.command('beli', async (ctx) => {
     );
 });
 
+// Handle back to /beli from quantity selection
+bot.callbackQuery('back_to_beli', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const p = (tier) => TIER_PRICES[tier].toLocaleString('id-ID');
+    const keyboard = new InlineKeyboard()
+        .text(`⚡ Basic — Rp ${p('basic')} (tanpa garansi)`, 'buy_tier_basic')
+        .row()
+        .text(`🛡️ Standard — Rp ${p('standard')} (14 hari garansi)`, 'buy_tier_standard')
+        .row()
+        .text(`👑 Premium — Rp ${p('premium')} (30 hari garansi)`, 'buy_tier_premium');
+
+    await ctx.reply(
+        `💰 *BELI KREDIT*\n━━━━━━━━━━━━━━━━━━━━\n\nPilih paket yang mau dibeli:`,
+        { parse_mode: 'Markdown', reply_markup: keyboard }
+    );
+});
+
 // Handle tier selection for /beli
 bot.callbackQuery(/^buy_tier_(basic|standard|premium)$/, async (ctx) => {
     const tier = ctx.match[1];
@@ -453,7 +477,9 @@ bot.callbackQuery(/^buy_tier_(basic|standard|premium)$/, async (ctx) => {
         .row()
         .text(`3x — Rp ${(price * 3).toLocaleString('id-ID')}`, `buypay_${tier}_3`)
         .row()
-        .text(`5x — Rp ${(price * 5).toLocaleString('id-ID')}`, `buypay_${tier}_5`);
+        .text(`5x — Rp ${(price * 5).toLocaleString('id-ID')}`, `buypay_${tier}_5`)
+        .row()
+        .text('⬅️ Kembali', 'back_to_beli');
 
     const tierLabel = { basic: 'Basic', standard: 'Standard (14 hari garansi)', premium: 'Premium (30 hari garansi)' };
     await ctx.reply(
@@ -512,7 +538,7 @@ bot.callbackQuery(/^buypay_(basic|standard|premium)_(\d+)$/, async (ctx) => {
             qrisMessageId = qrisMsg.message_id;
         }
 
-        startPaymentPoller(chatId, telegramId, payment.transactionId, creditsToBuy, qrisMessageId);
+        startPaymentPoller(chatId, telegramId, payment.transactionId, creditsToBuy, qrisMessageId, tier);
     } catch (err) {
         console.error('[Buy] Error creating payment:', err.message);
         await ctx.api.editMessageText(chatId, msg.message_id, '❌ Gagal membuat QRIS. Coba lagi nanti.');
@@ -521,7 +547,7 @@ bot.callbackQuery(/^buypay_(basic|standard|premium)_(\d+)$/, async (ctx) => {
 
 // Remove old buy callbacks (no longer needed)
 
-async function startPaymentPoller(chatId, telegramId, transactionId, credits, qrisMessageId) {
+async function startPaymentPoller(chatId, telegramId, transactionId, credits, qrisMessageId, tier) {
     const maxAttempts = 90;
     let attempt = 0;
 
@@ -534,7 +560,8 @@ async function startPaymentPoller(chatId, telegramId, transactionId, credits, qr
     const poll = async () => {
         if (attempt >= maxAttempts) {
             await deleteQris();
-            await bot.api.sendMessage(telegramId, '⚠️ QRIS kamu sudah expired. Silakan /beli lagi untuk membuat QRIS baru.').catch(() => { });
+            await bot.api.sendMessage(telegramId, '⚠️ QRIS kamu sudah expired. Silakan /beli lagi untuk membuat QRIS baru.',
+                { reply_markup: menuKeyboard }).catch(() => { });
             return;
         }
         attempt++;
@@ -542,17 +569,19 @@ async function startPaymentPoller(chatId, telegramId, transactionId, credits, qr
             const txn = await checkPayment(transactionId);
             if (txn?.status === 'paid') {
                 await deleteQris();
+                const tierLabel = { basic: 'Basic', standard: 'Standard', premium: 'Premium' };
                 await bot.api.sendMessage(telegramId,
                     `✅ *Pembayaran Diterima!*\n\n` +
-                    `💎 ${credits} kredit berhasil ditambahkan ke akun kamu.\n\n` +
-                    `Gunakan /gpti email@example.com untuk invite sekarang!`,
-                    { parse_mode: 'Markdown' }
+                    `💎 ${credits} kredit *${tierLabel[tier] || ''}* berhasil ditambahkan ke akun kamu.\n\n` +
+                    `Gunakan /invite email@example.com untuk invite sekarang!`,
+                    { parse_mode: 'Markdown', reply_markup: menuKeyboard }
                 );
                 return;
             }
             if (txn?.status === 'expired') {
                 await deleteQris();
-                await bot.api.sendMessage(telegramId, '⚠️ QRIS kamu sudah expired. Silakan /beli lagi untuk membuat QRIS baru.');
+                await bot.api.sendMessage(telegramId, '⚠️ QRIS kamu sudah expired. Silakan /beli lagi untuk membuat QRIS baru.',
+                    { reply_markup: menuKeyboard });
                 return;
             }
         } catch (_) { }
@@ -560,8 +589,41 @@ async function startPaymentPoller(chatId, telegramId, transactionId, credits, qr
         setTimeout(poll, 10000);
     };
 
+    // Send status message with refresh/cancel buttons
+    const statusKeyboard = new InlineKeyboard()
+        .text('🔄 Cek Status', `qris_check_${transactionId}`)
+        .text('❌ Batalkan', `qris_cancel_${transactionId}`);
+    await bot.api.sendMessage(telegramId,
+        `⏳ *Menunggu pembayaran...*\n\nID: \`${transactionId}\`\n_Otomatis update, atau tekan tombol di bawah._`,
+        { parse_mode: 'Markdown', reply_markup: statusKeyboard }
+    ).catch(() => {});
+
     setTimeout(poll, 10000);
 }
+
+// QRIS manual check status callback
+bot.callbackQuery(/^qris_check_(.+)$/, async (ctx) => {
+    const transactionId = ctx.match[1];
+    try {
+        const txn = await checkPayment(transactionId);
+        if (txn?.status === 'paid') {
+            await ctx.answerCallbackQuery({ text: '✅ Sudah dibayar!' });
+        } else if (txn?.status === 'expired') {
+            await ctx.answerCallbackQuery({ text: '❌ QRIS expired' });
+        } else {
+            await ctx.answerCallbackQuery({ text: '⏳ Belum ada pembayaran terdeteksi' });
+        }
+    } catch {
+        await ctx.answerCallbackQuery({ text: '⚠️ Gagal cek status' });
+    }
+});
+
+// QRIS cancel callback
+bot.callbackQuery(/^qris_cancel_(.+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery({ text: 'Dibatalkan' });
+    await ctx.reply('❌ Pembayaran dibatalkan. Gunakan /beli untuk membuat QRIS baru.',
+        { reply_markup: menuKeyboard });
+});
 
 // =========================================================
 // /redeem - Redeem a code
@@ -607,11 +669,11 @@ bot.command('redeem', async (ctx) => {
 
     await ctx.reply(
         `🎉 *Redeem Berhasil!*\n\n` +
-        `🎫 Kode: \`${codeInput}\`\n` +
+        `🎟️ Kode: \`${codeInput}\`\n` +
         `💎 +${code.credits} kredit ditambahkan!\n\n` +
         `💰 Saldo sekarang: *${user.credits} kredit*\n\n` +
-        `Gunakan /gpti email@example.com untuk mulai invite!`,
-        { parse_mode: 'Markdown' }
+        `Gunakan /invite email@example.com untuk mulai invite!`,
+        { parse_mode: 'Markdown', reply_markup: menuKeyboard }
     );
 });
 
@@ -634,7 +696,7 @@ bot.command('riwayat', async (ctx) => {
         text += `${typeEmoji[t.type] || '•'} ${sign}${t.credits} kredit — ${t.description}\n_${date}_\n\n`;
     }
 
-    await ctx.reply(text, { parse_mode: 'Markdown' });
+    await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: menuKeyboard });
 });
 
 // =========================================================
