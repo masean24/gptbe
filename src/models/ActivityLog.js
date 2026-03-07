@@ -5,7 +5,7 @@ const activityLogSchema = new mongoose.Schema({
     userEmail: { type: String, default: '' },
     action: {
         type: String,
-        enum: ['register', 'login', 'approve', 'redeem', 'buy_credit', 'invite', 'payment_received', 'block', 'unblock'],
+        enum: ['register', 'login', 'approve', 'redeem', 'buy_credit', 'invite', 'payment_received', 'block', 'unblock', 'guarantee_claim'],
         required: true
     },
     details: { type: mongoose.Schema.Types.Mixed, default: {} },

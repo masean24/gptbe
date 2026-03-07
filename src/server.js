@@ -14,7 +14,7 @@ const Transaction = require('./models/Transaction');
 const Settings = require('./models/Settings');
 const ActivityLog = require('./models/ActivityLog');
 const InviteJob = require('./models/InviteJob');
-const { handleWebhookPayload, verifyWebhookSecret, createPayment, CREDIT_PRICE } = require('./services/qrisService');
+const { handleWebhookPayload, verifyWebhookSecret, createPayment, CREDIT_PRICE, TIER_PRICES, getTierPrice, getTierGuaranteeDays } = require('./services/qrisService');
 const { enqueue } = require('./services/queueService');
 const { notifyRedeemUsed, notifyPaymentReceived, notifyNewWebOrder, notifyNewWebRegistration } = require('./services/notifyService');
 const { sendRedeemCode } = require('./services/emailService');
@@ -142,6 +142,9 @@ app.post('/api/web/auth/login', authLimiter, async (req, res) => {
                 id: user._id,
                 email: user.email,
                 credits: user.credits,
+                credits_basic: user.credits_basic,
+                credits_standard: user.credits_standard,
+                credits_premium: user.credits_premium,
                 totalInvites: user.totalInvites,
                 isApproved: user.isApproved,
                 freeCreditsGiven: user.freeCreditsGiven,
@@ -197,17 +200,20 @@ app.get('/api/web/user/dashboard', authMiddleware, webUserMiddleware, async (req
                 id: user._id,
                 email: user.email,
                 credits: user.credits,
+                credits_basic: user.credits_basic,
+                credits_standard: user.credits_standard,
+                credits_premium: user.credits_premium,
                 totalInvites: user.totalInvites,
                 isApproved: user.isApproved,
                 freeCreditsGiven: user.freeCreditsGiven,
-                createdAt: user.createdAt,
+                isBlocked: user.isBlocked,
             },
             recentTransactions: recentTxns,
             serverStatus: {
                 online: availableSeats > 0,
                 availableSlots: availableSeats,
                 queueLength: pendingJobs,
-                pricePerInvite: CREDIT_PRICE,
+                tierPrices: TIER_PRICES,
             },
         });
     } catch (err) {
@@ -239,7 +245,7 @@ app.get('/api/web/user/transactions', authMiddleware, webUserMiddleware, async (
 });
 
 // =========================================================
-// Web User: Redeem code (adds credits to balance)
+// Web User: Redeem code (adds credits to basic tier)
 // =========================================================
 app.post('/api/web/user/redeem', authMiddleware, webUserMiddleware, async (req, res) => {
     try {
@@ -261,8 +267,8 @@ app.post('/api/web/user/redeem', authMiddleware, webUserMiddleware, async (req, 
         codeDoc.usedAt = new Date();
         await codeDoc.save();
 
-        // Add credits to user
-        user.credits += codeDoc.credits;
+        // Add credits to basic tier
+        user.credits_basic += codeDoc.credits;
         await user.save();
 
         // Log transaction
@@ -270,12 +276,13 @@ app.post('/api/web/user/redeem', authMiddleware, webUserMiddleware, async (req, 
             telegramId: `webuser_${user._id}`,
             type: 'redeem',
             credits: codeDoc.credits,
+            tier: 'basic',
             redeemCode: code.toUpperCase(),
-            description: `Redeem code ${code.toUpperCase()} (+${codeDoc.credits} kredit)`,
+            description: `Redeem code ${code.toUpperCase()} (+${codeDoc.credits} kredit basic)`,
         });
 
         // Log activity
-        await ActivityLog.create({ userId: `webuser_${user._id}`, userEmail: user.email, action: 'redeem', details: { code: code.toUpperCase(), credits: codeDoc.credits }, ip: req.ip }).catch(() => { });
+        await ActivityLog.create({ userId: `webuser_${user._id}`, userEmail: user.email, action: 'redeem', details: { code: code.toUpperCase(), credits: codeDoc.credits, tier: 'basic' }, ip: req.ip }).catch(() => {});
 
         await notifyRedeemUsed(code.toUpperCase(), codeDoc.credits, 'web');
 
@@ -283,7 +290,7 @@ app.post('/api/web/user/redeem', authMiddleware, webUserMiddleware, async (req, 
             success: true,
             creditsAdded: codeDoc.credits,
             newBalance: user.credits,
-            message: `✅ +${codeDoc.credits} kredit berhasil ditambahkan!`,
+            message: `✅ +${codeDoc.credits} kredit basic berhasil ditambahkan!`,
         });
     } catch (err) {
         console.error('[Web Redeem] Error:', err.message);
@@ -292,41 +299,47 @@ app.post('/api/web/user/redeem', authMiddleware, webUserMiddleware, async (req, 
 });
 
 // =========================================================
-// Web User: Request invite (uses credit from balance)
+// Web User: Request invite (uses tier-specific credit)
 // =========================================================
 app.post('/api/web/user/invite', authMiddleware, webUserMiddleware, async (req, res) => {
     try {
-        const { email } = req.body;
+        const { email, tier = 'basic' } = req.body;
         if (!email || !email.includes('@')) return res.status(400).json({ error: 'Email tidak valid' });
+        if (!['basic', 'standard', 'premium'].includes(tier)) return res.status(400).json({ error: 'Tier tidak valid' });
 
         const user = await WebUser.findById(req.user.webUserId);
         if (!user) return res.status(404).json({ error: 'User tidak ditemukan' });
-        if (user.credits < 1) return res.status(400).json({ error: 'Kredit tidak cukup. Silakan top up dulu.' });
+
+        const creditField = `credits_${tier}`;
+        if ((user[creditField] || 0) < 1) return res.status(400).json({ error: `Kredit ${tier} tidak cukup. Silakan top up dulu.` });
 
         const targetEmail = email.trim().toLowerCase();
 
         const account = await Account.findOne({ status: 'active', $expr: { $lt: ['$inviteCount', '$maxInvites'] } });
         if (!account) return res.status(503).json({ error: 'Semua akun sedang penuh. Coba lagi nanti.' });
 
-        // Deduct credit
-        user.credits -= 1;
+        // Deduct tier-specific credit
+        user[creditField] -= 1;
         user.totalInvites += 1;
         await user.save();
+
+        const tierLabel = { basic: 'Basic', standard: 'Standard (14 hari garansi)', premium: 'Premium (30 hari garansi)' };
 
         // Log transaction
         await Transaction.create({
             telegramId: `webuser_${user._id}`,
             type: 'invite_used',
             credits: -1,
+            tier,
             invitedEmail: targetEmail,
-            description: `Invite ${targetEmail}`,
+            description: `Invite ${targetEmail} [${tierLabel[tier]}]`,
         });
 
         // Log activity
-        await ActivityLog.create({ userId: `webuser_${user._id}`, userEmail: user.email, action: 'invite', details: { email: targetEmail }, ip: req.ip }).catch(() => { });
+        await ActivityLog.create({ userId: `webuser_${user._id}`, userEmail: user.email, action: 'invite', details: { email: targetEmail, tier }, ip: req.ip }).catch(() => {});
 
-        // Enqueue
-        const { jobId, position } = await enqueue(`webuser_${user._id}`, targetEmail);
+        // Enqueue with tier
+        const { jobId, position } = await enqueue(`webuser_${user._id}`, targetEmail, tier);
 
         await notifyNewWebOrder(targetEmail, 'Dashboard');
 
@@ -334,10 +347,11 @@ app.post('/api/web/user/invite', authMiddleware, webUserMiddleware, async (req, 
             success: true,
             jobId,
             position,
+            tier,
             newBalance: user.credits,
             message: position > 1
-                ? `✅ Antrian ke-${position}. Email ${targetEmail} akan segera diinvite.`
-                : `✅ Sedang diproses! Email ${targetEmail} akan segera diinvite.`,
+                ? `✅ Antrian ke-${position}. Email ${targetEmail} akan segera diinvite. (${tierLabel[tier]})`
+                : `✅ Sedang diproses! Email ${targetEmail} akan segera diinvite. (${tierLabel[tier]})`,
         });
     } catch (err) {
         console.error('[Web Invite] Error:', err.message);
@@ -346,18 +360,20 @@ app.post('/api/web/user/invite', authMiddleware, webUserMiddleware, async (req, 
 });
 
 // =========================================================
-// Web User: Create QRIS payment
+// Web User: Create QRIS payment (tier-based pricing)
 // =========================================================
 app.post('/api/web/user/pay', authMiddleware, webUserMiddleware, async (req, res) => {
     try {
-        const { credits = 1 } = req.body;
+        const { credits = 1, tier = 'basic' } = req.body;
+        if (!['basic', 'standard', 'premium'].includes(tier)) return res.status(400).json({ error: 'Tier tidak valid' });
+
         const user = await WebUser.findById(req.user.webUserId);
         if (!user) return res.status(404).json({ error: 'User tidak ditemukan' });
 
-        const payment = await createPayment(`webuser_${user._id}`, credits);
+        const payment = await createPayment(`webuser_${user._id}`, credits, tier);
 
         // Log activity
-        await ActivityLog.create({ userId: `webuser_${user._id}`, userEmail: user.email, action: 'buy_credit', details: { credits, amount: payment.amountTotal }, ip: req.ip }).catch(() => { });
+        await ActivityLog.create({ userId: `webuser_${user._id}`, userEmail: user.email, action: 'buy_credit', details: { credits, tier, amount: payment.amountTotal }, ip: req.ip }).catch(() => {});
 
         res.json({
             success: true,
@@ -367,10 +383,42 @@ app.post('/api/web/user/pay', authMiddleware, webUserMiddleware, async (req, res
             amountUnique: payment.amountUnique,
             expiresAt: payment.expiresAt,
             credits,
+            tier,
         });
     } catch (err) {
         console.error('[Web Pay] Error:', err.response?.data || err.message);
         res.status(500).json({ error: 'Gagal membuat QRIS: ' + (err.response?.data?.message || err.message) });
+    }
+});
+
+// =========================================================
+// Web User: Guarantee claim
+// =========================================================
+app.post('/api/web/user/guarantee', authMiddleware, webUserMiddleware, async (req, res) => {
+    try {
+        const { jobId } = req.body;
+        if (!jobId) return res.status(400).json({ error: 'Job ID diperlukan' });
+
+        const user = await WebUser.findById(req.user.webUserId);
+        if (!user) return res.status(404).json({ error: 'User tidak ditemukan' });
+
+        const job = await InviteJob.findOne({ _id: jobId, telegramId: `webuser_${user._id}`, status: 'done' });
+        if (!job) return res.status(404).json({ error: 'Invite job tidak ditemukan' });
+        if (job.tier === 'basic') return res.status(400).json({ error: 'Tier basic tidak memiliki garansi' });
+        if (!job.guaranteeUntil || new Date() > job.guaranteeUntil) return res.status(400).json({ error: 'Masa garansi sudah berakhir' });
+        if (job.guaranteeClaimed) return res.status(400).json({ error: 'Garansi sudah pernah di-claim' });
+
+        // Mark as claimed — admin will approve and re-invite
+        job.guaranteeClaimed = true;
+        await job.save();
+
+        // Log activity
+        await ActivityLog.create({ userId: `webuser_${user._id}`, userEmail: user.email, action: 'guarantee_claim', details: { jobId, tier: job.tier, email: job.targetEmail }, ip: req.ip }).catch(() => {});
+
+        res.json({ success: true, message: '✅ Claim garansi berhasil! Admin akan segera memproses re-invite kamu.' });
+    } catch (err) {
+        console.error('[Guarantee] Error:', err.message);
+        res.status(500).json({ error: 'Gagal claim garansi' });
     }
 });
 
@@ -382,7 +430,6 @@ app.get('/api/web/pay/status/:transactionId', async (req, res) => {
     const txn = await Transaction.findOne({ qrisTransactionId: transactionId, type: 'qris' });
     if (!txn) return res.status(404).json({ error: 'Transaksi tidak ditemukan' });
 
-    // Auto-expire pending transactions older than 15 minutes
     if (txn.qrisStatus === 'pending') {
         const ageMs = Date.now() - new Date(txn.createdAt).getTime();
         if (ageMs > 15 * 60 * 1000) {
@@ -402,9 +449,59 @@ app.get('/api/web/job/:jobId', async (req, res) => {
     try {
         const job = await InviteJob.findById(jobId);
         if (!job) return res.status(404).json({ error: 'Job tidak ditemukan' });
-        res.json({ status: job.status, result: job.result, email: job.targetEmail });
+        res.json({ status: job.status, result: job.result, email: job.targetEmail, tier: job.tier, guaranteeUntil: job.guaranteeUntil });
     } catch {
         res.status(400).json({ error: 'Invalid job ID' });
+    }
+});
+
+// =========================================================
+// Web User: List completed invites (for guarantee claims)
+// =========================================================
+app.get('/api/web/user/invites', authMiddleware, webUserMiddleware, async (req, res) => {
+    try {
+        const user = await WebUser.findById(req.user.webUserId);
+        if (!user) return res.status(404).json({ error: 'User tidak ditemukan' });
+
+        const jobs = await InviteJob.find({
+            telegramId: `webuser_${user._id}`,
+            status: 'done',
+        }).sort({ createdAt: -1 }).limit(50);
+
+        res.json({ invites: jobs });
+    } catch (err) {
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// =========================================================
+// Web User: Claim guarantee
+// =========================================================
+app.post('/api/web/user/guarantee', authMiddleware, webUserMiddleware, async (req, res) => {
+    try {
+        const { jobId } = req.body;
+        if (!jobId) return res.status(400).json({ error: 'Job ID diperlukan' });
+
+        const user = await WebUser.findById(req.user.webUserId);
+        if (!user) return res.status(404).json({ error: 'User tidak ditemukan' });
+
+        const job = await InviteJob.findOne({ _id: jobId, telegramId: `webuser_${user._id}`, status: 'done' });
+        if (!job) return res.status(404).json({ error: 'Invite job tidak ditemukan' });
+        if (job.tier === 'basic') return res.status(400).json({ error: 'Tier basic tidak memiliki garansi' });
+        if (!job.guaranteeUntil || new Date() > job.guaranteeUntil) return res.status(400).json({ error: 'Masa garansi sudah berakhir' });
+        if (job.guaranteeClaimed) return res.status(400).json({ error: 'Garansi sudah pernah di-claim' });
+
+        // Mark as claimed — admin will approve and re-invite
+        job.guaranteeClaimed = true;
+        await job.save();
+
+        // Log activity
+        await ActivityLog.create({ userId: `webuser_${user._id}`, userEmail: user.email, action: 'guarantee_claim', details: { jobId, tier: job.tier, email: job.targetEmail }, ip: req.ip }).catch(() => {});
+
+        res.json({ success: true, message: '✅ Claim garansi berhasil! Admin akan segera memproses re-invite kamu.' });
+    } catch (err) {
+        console.error('[Guarantee] Error:', err.message);
+        res.status(500).json({ error: 'Gagal claim garansi' });
     }
 });
 
@@ -419,7 +516,8 @@ app.get('/api/web/status', async (req, res) => {
         online: availableSeats > 0,
         availableSlots: availableSeats,
         queueLength: pendingJobs,
-        pricePerInvite: CREDIT_PRICE,
+        pricePerInvite: TIER_PRICES.basic,
+        tierPrices: TIER_PRICES,
     });
 });
 
@@ -442,10 +540,11 @@ app.post('/api/webhooks/qris', async (req, res) => {
                 const webUserId = result.telegramId.replace('webuser_', '');
                 const webUser = await WebUser.findById(webUserId);
                 if (webUser) {
-                    webUser.credits += result.creditsAdded || 1;
+                    const tier = result.tier || 'basic';
+                    const creditField = `credits_${tier}`;
+                    webUser[creditField] = (webUser[creditField] || 0) + (result.creditsAdded || 1);
                     await webUser.save();
-                    // Log activity
-                    await ActivityLog.create({ userId: result.telegramId, userEmail: webUser.email, action: 'payment_received', details: { amount: result.amount || CREDIT_PRICE, credits: result.creditsAdded || 1 } }).catch(() => { });
+                    await ActivityLog.create({ userId: result.telegramId, userEmail: webUser.email, action: 'payment_received', details: { amount: result.amount || CREDIT_PRICE, credits: result.creditsAdded || 1, tier } }).catch(() => {});
                 }
                 await notifyPaymentReceived(result.amount || CREDIT_PRICE, result.creditsAdded || 1, 'web-dashboard');
             } else if (result.telegramId && result.telegramId.startsWith('web_')) {
@@ -456,8 +555,10 @@ app.post('/api/webhooks/qris', async (req, res) => {
                 // Telegram user — notify via bot
                 try {
                     const { bot } = require('./bot/userHandlers');
+                    const tier = result.tier || 'basic';
+                    const tierLabel = { basic: 'Basic', standard: 'Standard', premium: 'Premium' };
                     await bot.api.sendMessage(result.telegramId,
-                        `✅ *Pembayaran Diterima!*\n\n💎 +${result.creditsAdded} kredit telah ditambahkan!\n💰 Saldo: *${result.newBalance} kredit*\n\nGunakan /gpti email@example.com untuk invite sekarang!`,
+                        `✅ *Pembayaran Diterima!*\n\n💎 +${result.creditsAdded} kredit ${tierLabel[tier]} telah ditambahkan!\n💰 Saldo: *${result.newBalance} kredit*\n\nGunakan /gpti email@example.com untuk invite sekarang!`,
                         { parse_mode: 'Markdown' }
                     );
                     await notifyPaymentReceived(result.amount || CREDIT_PRICE, result.creditsAdded, 'telegram');
@@ -469,6 +570,70 @@ app.post('/api/webhooks/qris', async (req, res) => {
     } catch (err) {
         console.error('[Webhook] Error:', err.message);
         res.status(500).json({ error: err.message });
+    }
+});
+
+// =========================================================
+// Admin: All Activity Logs (filterable)
+// =========================================================
+app.get('/api/admin/activity-logs', authMiddleware, adminMiddleware, async (req, res) => {
+    try {
+        const { page = 1, limit = 50, action, search } = req.query;
+        const filter = {};
+        if (action) filter.action = action;
+        if (search) filter.$or = [
+            { userEmail: { $regex: search, $options: 'i' } },
+            { userId: { $regex: search, $options: 'i' } },
+        ];
+        const logs = await ActivityLog.find(filter)
+            .sort({ createdAt: -1 })
+            .skip((page - 1) * limit)
+            .limit(parseInt(limit));
+        const total = await ActivityLog.countDocuments(filter);
+        res.json({ logs, total, page: parseInt(page), limit: parseInt(limit) });
+    } catch (err) {
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// =========================================================
+// Admin: Guarantee claims management
+// =========================================================
+app.get('/api/admin/guarantee-claims', authMiddleware, adminMiddleware, async (req, res) => {
+    try {
+        const claims = await InviteJob.find({ guaranteeClaimed: true, status: 'done' })
+            .sort({ processedAt: -1 }).limit(100);
+        res.json({ claims });
+    } catch (err) {
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+app.post('/api/admin/guarantee-claims/:jobId/approve', authMiddleware, adminMiddleware, async (req, res) => {
+    try {
+        const job = await InviteJob.findById(req.params.jobId);
+        if (!job) return res.status(404).json({ error: 'Job tidak ditemukan' });
+        if (!job.guaranteeClaimed) return res.status(400).json({ error: 'Belum di-claim' });
+
+        // Give back 1 credit of the same tier
+        const userId = job.telegramId;
+        const tier = job.tier || 'basic';
+        const creditField = `credits_${tier}`;
+
+        if (userId.startsWith('webuser_')) {
+            const webUserId = userId.replace('webuser_', '');
+            const user = await WebUser.findById(webUserId);
+            if (user) {
+                user[creditField] = (user[creditField] || 0) + 1;
+                await user.save();
+            }
+        } else {
+            await User.findOneAndUpdate({ telegramId: userId }, { $inc: { [creditField]: 1 } });
+        }
+
+        res.json({ success: true, message: `1 kredit ${tier} dikembalikan ke user` });
+    } catch (err) {
+        res.status(500).json({ error: 'Server error' });
     }
 });
 

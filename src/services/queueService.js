@@ -5,6 +5,7 @@ const Transaction = require('../models/Transaction');
 const RedeemCode = require('../models/RedeemCode');
 const { inviteTeamMember } = require('./playwrightService');
 const { notifyInviteFailed, notifyInviteSuccess } = require('./notifyService');
+const { getTierGuaranteeDays } = require('./qrisService');
 
 /**
  * If a web order used a redeem code and the invite failed,
@@ -38,9 +39,13 @@ let activeWorkers = 0;
 
 /**
  * Add a new invite job to the queue
+ * @param {string} telegramId
+ * @param {string} targetEmail
+ * @param {string} tier - 'basic', 'standard', or 'premium'
  */
-async function enqueue(telegramId, targetEmail) {
-    const job = await InviteJob.create({ telegramId, targetEmail });
+async function enqueue(telegramId, targetEmail, tier = 'basic') {
+    const guaranteeDays = getTierGuaranteeDays(tier);
+    const job = await InviteJob.create({ telegramId, targetEmail, tier, guaranteeDays });
     const position = await InviteJob.countDocuments({ status: 'queued', createdAt: { $lt: job.createdAt } }) + 1;
     processQueue(); // fire and forget
     return { jobId: job._id.toString(), position };
@@ -58,7 +63,7 @@ async function getQueuePosition(jobId) {
 }
 
 /**
- * Main queue processor - concurrent workers (controlled by MAX_CONCURRENT_INVITES)
+ * Main queue processor - concurrent workers
  */
 async function processQueue() {
     if (isProcessing) return;
@@ -66,7 +71,6 @@ async function processQueue() {
 
     try {
         while (true) {
-            // Wait if we're at max capacity
             if (activeWorkers >= MAX_CONCURRENT) {
                 await new Promise(resolve => setTimeout(resolve, 2000));
                 continue;
@@ -79,7 +83,6 @@ async function processQueue() {
             );
             if (!job) break;
 
-            // Launch worker without blocking the loop
             activeWorkers++;
             (async () => {
                 try {
@@ -97,11 +100,9 @@ async function processQueue() {
                 }
             })();
 
-            // Small delay between spawning workers
             await new Promise(resolve => setTimeout(resolve, 3000));
         }
     } finally {
-        // Wait for all active workers to finish
         while (activeWorkers > 0) {
             await new Promise(resolve => setTimeout(resolve, 1000));
         }
@@ -110,13 +111,14 @@ async function processQueue() {
 }
 
 async function processJob(job) {
-    const { telegramId, targetEmail } = job;
+    const { telegramId, targetEmail, tier } = job;
     const isWebOrder = telegramId.startsWith('web_');
 
-    // For Telegram users, check credits
+    // For Telegram users, check tier-specific credits
     if (!isWebOrder) {
         const user = await User.findOne({ telegramId });
-        if (!user || user.credits < 1) {
+        const creditField = `credits_${tier || 'basic'}`;
+        if (!user || (user[creditField] || 0) < 1) {
             job.status = 'failed';
             job.result = 'credits_insufficient';
             await job.save();
@@ -138,15 +140,16 @@ async function processJob(job) {
     }
 
     // Do the invite via Playwright
-    console.log(`[Queue] Starting invite for ${targetEmail} using account ${account.email}`);
+    console.log(`[Queue] Starting invite for ${targetEmail} using account ${account.email} (tier: ${tier})`);
     const result = await inviteTeamMember(account, targetEmail);
     console.log(`[Queue] Invite result for ${targetEmail}:`, JSON.stringify(result));
 
     if (result.success) {
-        // Deduct credit for Telegram users only (web orders already "paid")
+        // Deduct tier-specific credit for Telegram users
         if (!isWebOrder) {
+            const creditField = `credits_${tier || 'basic'}`;
             const user = await User.findOne({ telegramId });
-            user.credits -= 1;
+            user[creditField] = Math.max(0, (user[creditField] || 0) - 1);
             user.totalInvites += 1;
             user.lastActivityAt = new Date();
             await user.save();
@@ -158,13 +161,23 @@ async function processJob(job) {
         if (account.inviteCount >= account.maxInvites) account.status = 'full';
         await account.save();
 
+        // Set guarantee date
+        const guaranteeDays = getTierGuaranteeDays(tier || 'basic');
+        if (guaranteeDays > 0) {
+            const guaranteeUntil = new Date();
+            guaranteeUntil.setDate(guaranteeUntil.getDate() + guaranteeDays);
+            job.guaranteeUntil = guaranteeUntil;
+        }
+
         // Log transaction
+        const tierLabel = { basic: 'Basic', standard: 'Standard', premium: 'Premium' };
         await Transaction.create({
             telegramId,
             type: 'invite_used',
             credits: -1,
             invitedEmail: targetEmail,
-            description: `Invite ${targetEmail} via akun ${account.email}`,
+            tier: tier || 'basic',
+            description: `Invite ${targetEmail} via akun ${account.email} [${tierLabel[tier] || 'Basic'}]`,
         });
 
         job.status = 'done';
@@ -179,8 +192,11 @@ async function processJob(job) {
         if (!isWebOrder) {
             try {
                 const { bot } = require('../bot/userHandlers');
+                const guaranteeMsg = guaranteeDays > 0
+                    ? `\n🛡️ Garansi: ${guaranteeDays} hari (sampai ${job.guaranteeUntil.toLocaleDateString('id-ID')})`
+                    : '\n⚠️ Tanpa garansi';
                 await bot.api.sendMessage(telegramId,
-                    `✅ *Invite Berhasil!*\n\n📧 \`${targetEmail}\` sudah diinvite ke ChatGPT Plus!`,
+                    `✅ *Invite Berhasil!*\n\n📧 \`${targetEmail}\` sudah diinvite ke ChatGPT Plus!${guaranteeMsg}`,
                     { parse_mode: 'Markdown' }
                 );
             } catch (_) { }
@@ -202,7 +218,6 @@ async function notifyUser(telegramId, targetEmail, reason) {
     if (telegramId.startsWith('web_')) return;
     try {
         const { bot } = require('../bot/userHandlers');
-        // Don't use Markdown here — error messages may contain special chars
         await bot.api.sendMessage(telegramId,
             `❌ Invite Gagal\n\n📧 Email: ${targetEmail}\n💬 Alasan: ${reason}\n\nKredit kamu tidak dikurangi. Silakan coba lagi atau hubungi admin.`
         );

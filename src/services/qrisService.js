@@ -5,7 +5,30 @@ const User = require('../models/User');
 
 const QRIS_API_URL = process.env.QRIS_API_URL || 'https://qris.hubify.store/api';
 const QRIS_API_KEY = process.env.QRIS_API_KEY;
-const CREDIT_PRICE = parseInt(process.env.CREDIT_PRICE || '5000');
+
+// Tier pricing
+const TIER_PRICES = {
+    basic: parseInt(process.env.TIER_BASIC_PRICE || '5000'),
+    standard: parseInt(process.env.TIER_STANDARD_PRICE || '10000'),
+    premium: parseInt(process.env.TIER_PREMIUM_PRICE || '15000'),
+};
+
+const TIER_GUARANTEE_DAYS = {
+    basic: 0,
+    standard: 14,
+    premium: 30,
+};
+
+// Backward compat
+const CREDIT_PRICE = TIER_PRICES.basic;
+
+function getTierPrice(tier) {
+    return TIER_PRICES[tier] || TIER_PRICES.basic;
+}
+
+function getTierGuaranteeDays(tier) {
+    return TIER_GUARANTEE_DAYS[tier] || 0;
+}
 
 const qrisClient = axios.create({
     baseURL: QRIS_API_URL,
@@ -20,15 +43,14 @@ const qrisClient = axios.create({
  * Create a QRIS transaction for a user wanting to buy credits
  * @param {string} telegramId
  * @param {number} creditsToBuy
- * @returns {Object} transaction info including QRIS content
+ * @param {string} tier - 'basic', 'standard', or 'premium'
  */
-async function createPayment(telegramId, creditsToBuy) {
-    const amount = creditsToBuy * CREDIT_PRICE;
-    // Clean order_id — no special chars that might break the API
+async function createPayment(telegramId, creditsToBuy, tier = 'basic') {
+    const pricePerCredit = getTierPrice(tier);
+    const amount = creditsToBuy * pricePerCredit;
     const cleanId = telegramId.replace(/[^a-zA-Z0-9_-]/g, '_');
     const orderId = `GPTI-${cleanId}-${Date.now()}`;
 
-    // customer_id must be short and clean for the QRIS API
     const customerId = telegramId.startsWith('web_')
         ? `web_${Date.now()}`
         : `tg_${telegramId}`;
@@ -47,10 +69,11 @@ async function createPayment(telegramId, creditsToBuy) {
         type: 'qris',
         credits: creditsToBuy,
         amount: data.amount_original,
+        tier,
         qrisTransactionId: data.transaction_id,
         qrisOrderId: orderId,
         qrisStatus: 'pending',
-        description: `Beli ${creditsToBuy} kredit via QRIS`,
+        description: `Beli ${creditsToBuy} kredit ${tier} via QRIS`,
     });
 
     return {
@@ -62,12 +85,12 @@ async function createPayment(telegramId, creditsToBuy) {
         expiresAt: data.expires_at,
         orderId,
         creditsToBuy,
+        tier,
     };
 }
 
 /**
  * Check if a payment has been completed
- * @param {string} qrisTransactionId
  */
 async function checkPayment(qrisTransactionId) {
     const response = await qrisClient.get(`/check-status/${qrisTransactionId}`);
@@ -76,8 +99,6 @@ async function checkPayment(qrisTransactionId) {
 
 /**
  * Handle inbound webhook from QRIS gateway when payment completes
- * - Adds credits to user
- * - Updates transaction status
  */
 async function handleWebhookPayload(payload) {
     const { order_id, status } = payload;
@@ -85,32 +106,31 @@ async function handleWebhookPayload(payload) {
     if (status !== 'completed') return { matched: false };
     if (!order_id) return { matched: false };
 
-    // Find the pending transaction by order_id
     const txn = await Transaction.findOne({
         qrisOrderId: order_id,
         qrisStatus: 'pending',
     });
 
     if (!txn) return { matched: false };
-
-    // Already processed guard
     if (txn.qrisStatus === 'paid') return { matched: true, alreadyProcessed: true };
 
     const telegramId = txn.telegramId;
+    const tier = txn.tier || 'basic';
 
     // Update transaction
     txn.qrisStatus = 'paid';
     await txn.save();
 
-    // Add credits to user (skip for web orders - they get auto-invite instead)
+    // Add tier-specific credits to user (skip for web orders)
     let newBalance = 0;
     if (!telegramId.startsWith('web_')) {
+        const creditField = `credits_${tier}`;
         const user = await User.findOneAndUpdate(
             { telegramId },
-            { $inc: { credits: txn.credits } },
+            { $inc: { [creditField]: txn.credits } },
             { new: true, upsert: true }
         );
-        newBalance = user.credits;
+        newBalance = user.credits_basic + user.credits_standard + user.credits_premium;
     }
 
     return {
@@ -119,18 +139,22 @@ async function handleWebhookPayload(payload) {
         creditsAdded: txn.credits,
         newBalance,
         amount: txn.amount,
+        tier,
         transactionId: txn.qrisTransactionId,
     };
 }
 
 /**
- * Verify webhook signature (simple or HMAC)
+ * Verify webhook signature
  */
 function verifyWebhookSecret(req) {
     const secret = process.env.QRIS_WEBHOOK_SECRET;
-    if (!secret) return true; // skip if not configured
+    if (!secret) return true;
     const receivedSecret = req.headers['x-webhook-secret'];
     return receivedSecret === secret;
 }
 
-module.exports = { createPayment, checkPayment, handleWebhookPayload, verifyWebhookSecret, CREDIT_PRICE };
+module.exports = {
+    createPayment, checkPayment, handleWebhookPayload, verifyWebhookSecret,
+    CREDIT_PRICE, TIER_PRICES, TIER_GUARANTEE_DAYS, getTierPrice, getTierGuaranteeDays
+};

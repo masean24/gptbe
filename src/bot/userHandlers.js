@@ -4,9 +4,11 @@ const User = require('../models/User');
 const Account = require('../models/Account');
 const RedeemCode = require('../models/RedeemCode');
 const Transaction = require('../models/Transaction');
+const InviteJob = require('../models/InviteJob');
+const ActivityLog = require('../models/ActivityLog');
 const Settings = require('../models/Settings');
 const { enqueue } = require('../services/queueService');
-const { createPayment, checkPayment, CREDIT_PRICE } = require('../services/qrisService');
+const { createPayment, checkPayment, CREDIT_PRICE, TIER_PRICES, getTierPrice } = require('../services/qrisService');
 const { loginAccount } = require('../services/playwrightService');
 const { generateCodes } = require('./adminHandlers');
 
@@ -216,8 +218,11 @@ bot.command('status', async (ctx) => {
         `👤 *${user.firstName || user.username || 'User'}*` +
         `${user.username ? ` (@${user.username})` : ''}\n` +
         `🆔 ID: \`${user.telegramId}\`\n\n` +
-        `💎 Saldo Kredit : *${user.credits}*\n` +
-        `📧 Total Invite  : *${user.totalInvites}*\n\n` +
+        `💎 *Saldo Kredit*\n` +
+        `  Basic: *${user.credits_basic || 0}*\n` +
+        `  Standard: *${user.credits_standard || 0}* (14 hari garansi)\n` +
+        `  Premium: *${user.credits_premium || 0}* (30 hari garansi)\n\n` +
+        `📧 Total Invite: *${user.totalInvites}*\n\n` +
         `━━━━━━━━━━━━━━━━━━━━\n` +
         `🤖 Server: ${activeAccounts > 0 ? `✅ Online (${activeAccounts} akun aktif)` : '⚠️ Sedang maintenance'}\n\n` +
         `▸ /beli — tambah kredit\n` +
@@ -244,10 +249,11 @@ bot.command('gpti', async (ctx) => {
     const telegramId = String(ctx.from.id);
     const user = await User.findOne({ telegramId });
 
-    if (!user || user.credits < 1) {
+    const totalCredits = (user?.credits_basic || 0) + (user?.credits_standard || 0) + (user?.credits_premium || 0);
+    if (!user || totalCredits < 1) {
         return ctx.reply(
             `❌ *Saldo kredit tidak cukup!*\n\n` +
-            `💰 Kredit kamu: *${user?.credits || 0}*\n\n` +
+            `💰 Kredit kamu: *${totalCredits}*\n\n` +
             `Pilih cara topup:\n` +
             `• /beli — Bayar via QRIS\n` +
             `• /redeem KODE — Tukar Redeem Code`,
@@ -260,19 +266,151 @@ bot.command('gpti', async (ctx) => {
         return ctx.reply('🚧 *Maintenance* — Semua akun sedang penuh. Coba lagi nanti.', { parse_mode: 'Markdown' });
     }
 
-    const processing = await ctx.reply('⏳ Memasukkan ke antrian...');
-    const { jobId, position } = await enqueue(telegramId, targetEmail);
+    // Check which tiers are available and let user pick
+    const available = [];
+    if ((user.credits_basic || 0) >= 1) available.push({ tier: 'basic', label: '⚡ Basic (tanpa garansi)', credits: user.credits_basic });
+    if ((user.credits_standard || 0) >= 1) available.push({ tier: 'standard', label: '🛡️ Standard (14 hari garansi)', credits: user.credits_standard });
+    if ((user.credits_premium || 0) >= 1) available.push({ tier: 'premium', label: '👑 Premium (30 hari garansi)', credits: user.credits_premium });
 
-    let msg = `✅ *Request diterima!*\n\n📧 Email: \`${targetEmail}\`\n`;
+    if (available.length === 1) {
+        // Only one tier available, use it directly
+        const tier = available[0].tier;
+        const processing = await ctx.reply('⏳ Memasukkan ke antrian...');
+        const { jobId, position } = await enqueue(telegramId, targetEmail, tier);
+
+        let msg = `✅ *Request diterima!* [${tier.toUpperCase()}]\n\n📧 Email: \`${targetEmail}\`\n`;
+        if (position > 1) {
+            msg += `⏳ Posisi antrian: *${position}*\n`;
+            msg += `\nKamu akan mendapat notifikasi saat invite berhasil dikirim.`;
+        } else {
+            msg += `\n🔄 Sedang diproses sekarang...\nKamu akan mendapat notifikasi hasilnya.`;
+        }
+        await ctx.api.editMessageText(ctx.chat.id, processing.message_id, msg, { parse_mode: 'Markdown' });
+    } else {
+        // Multiple tiers available, let user pick
+        const keyboard = new InlineKeyboard();
+        for (const t of available) {
+            keyboard.text(`${t.label} (${t.credits}x)`, `invite_tier_${t.tier}_${targetEmail}`).row();
+        }
+        await ctx.reply(
+            `📧 Invite ke \`${targetEmail}\`\n\n` +
+            `Pilih tier kredit yang mau dipakai:`,
+            { parse_mode: 'Markdown', reply_markup: keyboard }
+        );
+    }
+});
+
+// Handle invite tier selection callback
+bot.callbackQuery(/^invite_tier_(basic|standard|premium)_(.+)$/, async (ctx) => {
+    const tier = ctx.match[1];
+    const targetEmail = ctx.match[2];
+    const telegramId = String(ctx.from.id);
+
+    await ctx.answerCallbackQuery();
+
+    const user = await User.findOne({ telegramId });
+    const creditField = `credits_${tier}`;
+    if (!user || (user[creditField] || 0) < 1) {
+        return ctx.reply(`❌ Kredit ${tier} tidak cukup.`);
+    }
+
+    const processing = await ctx.reply('⏳ Memasukkan ke antrian...');
+    const { jobId, position } = await enqueue(telegramId, targetEmail, tier);
+
+    let msg = `✅ *Request diterima!* [${tier.toUpperCase()}]\n\n📧 Email: \`${targetEmail}\`\n`;
     if (position > 1) {
         msg += `⏳ Posisi antrian: *${position}*\n`;
         msg += `\nKamu akan mendapat notifikasi saat invite berhasil dikirim.`;
     } else {
         msg += `\n🔄 Sedang diproses sekarang...\nKamu akan mendapat notifikasi hasilnya.`;
     }
-
     await ctx.api.editMessageText(ctx.chat.id, processing.message_id, msg, { parse_mode: 'Markdown' });
-    bot.api.sendMessage(telegramId, `📨 Update invite ${targetEmail} akan dikirim ke sini.`).catch(() => { });
+});
+
+// =========================================================
+// /garansi - View & claim guarantees
+// =========================================================
+bot.command('garansi', async (ctx) => {
+    if (!(await forceJoinCheck(ctx))) return;
+
+    const telegramId = String(ctx.from.id);
+    const jobs = await InviteJob.find({
+        telegramId,
+        status: 'done',
+        tier: { $in: ['standard', 'premium'] },
+        guaranteeUntil: { $ne: null },
+    }).sort({ createdAt: -1 }).limit(10);
+
+    if (jobs.length === 0) {
+        return ctx.reply(
+            `🛡️ *GARANSI*\n━━━━━━━━━━━━━━━━━━━━\n\n` +
+            `Kamu belum punya invite dengan garansi.\n\n` +
+            `Garansi tersedia untuk tier *Standard* (14 hari) dan *Premium* (30 hari).\n` +
+            `Gunakan /beli untuk membeli kredit bergaransi.`,
+            { parse_mode: 'Markdown' }
+        );
+    }
+
+    const tierLabel = { standard: '🛡️ Standard', premium: '👑 Premium' };
+    let text = `🛡️ *GARANSI INVITE*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+    const keyboard = new InlineKeyboard();
+    let claimable = 0;
+
+    for (const job of jobs) {
+        const hasGuarantee = job.guaranteeUntil && new Date(job.guaranteeUntil) > new Date();
+        const expDate = job.guaranteeUntil ? new Date(job.guaranteeUntil).toLocaleDateString('id-ID', { day: 'numeric', month: 'short' }) : '-';
+        const statusIcon = job.guaranteeClaimed ? '⏳' : (hasGuarantee ? '✅' : '❌');
+        const statusText = job.guaranteeClaimed ? 'Menunggu Admin' : (hasGuarantee ? `s/d ${expDate}` : 'Expired');
+
+        text += `${statusIcon} \`${job.targetEmail}\` — ${tierLabel[job.tier] || job.tier} (${statusText})\n`;
+
+        if (hasGuarantee && !job.guaranteeClaimed) {
+            keyboard.text(`🛡️ Claim: ${job.targetEmail}`, `claim_guarantee_${job._id}`).row();
+            claimable++;
+        }
+    }
+
+    text += `\n_Tekan tombol di bawah untuk claim garansi jika akses ChatGPT Plus hilang._`;
+
+    if (claimable > 0) {
+        await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: keyboard });
+    } else {
+        await ctx.reply(text, { parse_mode: 'Markdown' });
+    }
+});
+
+// Handle guarantee claim callback
+bot.callbackQuery(/^claim_guarantee_(.+)$/, async (ctx) => {
+    const jobId = ctx.match[1];
+    const telegramId = String(ctx.from.id);
+
+    await ctx.answerCallbackQuery();
+
+    try {
+        const job = await InviteJob.findOne({ _id: jobId, telegramId, status: 'done' });
+        if (!job) return ctx.reply('❌ Invite job tidak ditemukan.');
+        if (job.tier === 'basic') return ctx.reply('❌ Tier basic tidak memiliki garansi.');
+        if (!job.guaranteeUntil || new Date() > job.guaranteeUntil) return ctx.reply('❌ Masa garansi sudah berakhir.');
+        if (job.guaranteeClaimed) return ctx.reply('⚠️ Garansi sudah pernah di-claim.');
+
+        job.guaranteeClaimed = true;
+        await job.save();
+
+        // Log activity
+        await ActivityLog.create({ userId: telegramId, action: 'guarantee_claim', details: { jobId, tier: job.tier, email: job.targetEmail } }).catch(() => {});
+
+        await ctx.reply(
+            `✅ *Claim Garansi Berhasil!*\n\n` +
+            `📧 Email: \`${job.targetEmail}\`\n` +
+            `🛡️ Tier: ${job.tier}\n\n` +
+            `Admin akan segera memproses re-invite kamu. Tunggu notifikasi ya!`,
+            { parse_mode: 'Markdown' }
+        );
+    } catch (err) {
+        console.error('[Garansi] Error:', err.message);
+        await ctx.reply('❌ Gagal claim garansi. Coba lagi nanti.');
+    }
 });
 
 // =========================================================
@@ -281,28 +419,55 @@ bot.command('gpti', async (ctx) => {
 bot.command('beli', async (ctx) => {
     if (!(await forceJoinCheck(ctx))) return;
 
-    const p = (n) => (n * CREDIT_PRICE).toLocaleString('id-ID');
+    const p = (tier) => TIER_PRICES[tier].toLocaleString('id-ID');
     const keyboard = new InlineKeyboard()
-        .text(`1 Kredit — Rp ${p(1)}`, 'buy_1')
+        .text(`⚡ Basic — Rp ${p('basic')} (tanpa garansi)`, 'buy_tier_basic')
         .row()
-        .text(`3 Kredit — Rp ${p(3)}`, 'buy_3')
+        .text(`🛡️ Standard — Rp ${p('standard')} (14 hari garansi)`, 'buy_tier_standard')
         .row()
-        .text(`5 Kredit — Rp ${p(5)}`, 'buy_5')
-        .row()
-        .text(`10 Kredit — Rp ${p(10)}`, 'buy_10');
+        .text(`👑 Premium — Rp ${p('premium')} (30 hari garansi)`, 'buy_tier_premium');
 
     await ctx.reply(
         `💰 *BELI KREDIT*\n━━━━━━━━━━━━━━━━━━━━\n\n` +
-        `1 Kredit = 1x Invite ke ChatGPT Plus\n` +
-        `Harga: *Rp ${CREDIT_PRICE.toLocaleString('id-ID')} / kredit*\n\n` +
-        `Pilih jumlah kredit yang ingin dibeli:`,
+        `1 Kredit = 1x Invite ke ChatGPT Plus\n\n` +
+        `📋 *Pilihan Paket:*\n\n` +
+        `⚡ *Basic* — Rp ${p('basic')}\n` +
+        `   Tanpa garansi\n\n` +
+        `🛡️ *Standard* — Rp ${p('standard')}\n` +
+        `   Garansi 14 hari (re-invite gratis jika revoke)\n\n` +
+        `👑 *Premium* — Rp ${p('premium')}\n` +
+        `   Garansi 30 hari (re-invite gratis jika revoke)\n\n` +
+        `Pilih paket yang mau dibeli:`,
         { parse_mode: 'Markdown', reply_markup: keyboard }
     );
 });
 
-// Handle buy callback
-bot.callbackQuery(/^buy_(\d+)$/, async (ctx) => {
-    const creditsToBuy = parseInt(ctx.match[1]);
+// Handle tier selection for /beli
+bot.callbackQuery(/^buy_tier_(basic|standard|premium)$/, async (ctx) => {
+    const tier = ctx.match[1];
+    await ctx.answerCallbackQuery();
+
+    const price = TIER_PRICES[tier];
+    const keyboard = new InlineKeyboard()
+        .text(`1x — Rp ${price.toLocaleString('id-ID')}`, `buypay_${tier}_1`)
+        .row()
+        .text(`3x — Rp ${(price * 3).toLocaleString('id-ID')}`, `buypay_${tier}_3`)
+        .row()
+        .text(`5x — Rp ${(price * 5).toLocaleString('id-ID')}`, `buypay_${tier}_5`);
+
+    const tierLabel = { basic: 'Basic', standard: 'Standard (14 hari garansi)', premium: 'Premium (30 hari garansi)' };
+    await ctx.reply(
+        `💎 *Beli Kredit ${tierLabel[tier]}*\n\n` +
+        `Harga: *Rp ${price.toLocaleString('id-ID')} / kredit*\n\n` +
+        `Pilih jumlah kredit:`,
+        { parse_mode: 'Markdown', reply_markup: keyboard }
+    );
+});
+
+// Handle buy payment callback
+bot.callbackQuery(/^buypay_(basic|standard|premium)_(\d+)$/, async (ctx) => {
+    const tier = ctx.match[1];
+    const creditsToBuy = parseInt(ctx.match[2]);
     const telegramId = String(ctx.from.id);
     const chatId = ctx.chat.id;
 
@@ -310,14 +475,15 @@ bot.callbackQuery(/^buy_(\d+)$/, async (ctx) => {
     const msg = await ctx.reply('⏳ Membuat QRIS payment...');
 
     try {
-        const payment = await createPayment(telegramId, creditsToBuy);
+        const payment = await createPayment(telegramId, creditsToBuy, tier);
         const totalFormatted = payment.amountTotal.toLocaleString('id-ID');
         const expiresAt = new Date(payment.expiresAt);
         const expiresStr = expiresAt.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+        const tierLabel = { basic: 'Basic', standard: 'Standard', premium: 'Premium' };
 
         const caption =
             `🧾 *QRIS PAYMENT*\n━━━━━━━━━━━━━━━━━━━━\n\n` +
-            `💎 Kredit: *${creditsToBuy}x*\n` +
+            `💎 Kredit: *${creditsToBuy}x ${tierLabel[tier]}*\n` +
             `💵 Total Bayar: *Rp ${totalFormatted}*\n` +
             `  _(Nominal unik: ${payment.amountUnique} — transfer tepat segini)_\n\n` +
             `⏰ Expired: *${expiresStr}*\n\n` +
@@ -325,7 +491,7 @@ bot.callbackQuery(/^buy_(\d+)$/, async (ctx) => {
             `_Kredit akan otomatis masuk setelah pembayaran terdeteksi._\n` +
             `ID: \`${payment.transactionId}\``;
 
-        await ctx.api.deleteMessage(chatId, msg.message_id).catch(() => { });
+        await ctx.api.deleteMessage(chatId, msg.message_id).catch(() => {});
 
         let qrisMessageId = null;
         try {
@@ -352,6 +518,8 @@ bot.callbackQuery(/^buy_(\d+)$/, async (ctx) => {
         await ctx.api.editMessageText(chatId, msg.message_id, '❌ Gagal membuat QRIS. Coba lagi nanti.');
     }
 });
+
+// Remove old buy callbacks (no longer needed)
 
 async function startPaymentPoller(chatId, telegramId, transactionId, credits, qrisMessageId) {
     const maxAttempts = 90;

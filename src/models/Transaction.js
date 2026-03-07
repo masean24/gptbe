@@ -13,6 +13,8 @@ const transactionSchema = new mongoose.Schema({
     redeemCode: { type: String, default: null },
     // Invite specific
     invitedEmail: { type: String, default: null },
+    // Tier
+    tier: { type: String, enum: ['basic', 'standard', 'premium', null], default: null },
     description: { type: String, default: '' },
     createdAt: { type: Date, default: Date.now },
 });
