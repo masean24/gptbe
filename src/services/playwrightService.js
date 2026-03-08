@@ -123,6 +123,14 @@ async function launchBrowser(proxy, nsName = null) {
  */
 async function dismissPopups(page) {
     try {
+        // Handle "Update your workspace display name" popup → klik "Update later"
+        const updateLaterBtn = page.locator('text=Update later');
+        if ((await updateLaterBtn.count()) > 0) {
+            await updateLaterBtn.first().click();
+            console.log('[Playwright] Dismissed "Update workspace display name" popup');
+            await page.waitForTimeout(1500);
+        }
+
         // Check for "Business workspace ready" or similar popups
         const popupTexts = ['workspace is ready', 'transfer chat', 'start as empty'];
         const bodyText = (await page.textContent('body'))?.toLowerCase() || '';
@@ -222,7 +230,8 @@ async function loginAccount(account) {
             }
 
             // Generate token LANGSUNG sebelum fill — minimal delay
-            const token = speakeasy.totp({ secret: account.twoFASecret, encoding: 'base32' });
+            // window: 1 = toleransi ±30 detik clock skew antara VPS dan server OpenAI
+            const token = speakeasy.totp({ secret: account.twoFASecret, encoding: 'base32', window: 1 });
             console.log(`[Login][${account.email}] Step 4: Mengisi kode 2FA...`);
             await codeInput.fill(token);
             await page.waitForTimeout(500);
@@ -236,7 +245,7 @@ async function loginAccount(account) {
                 // Tunggu window berikutnya pasti
                 const msNow = Date.now() % 30000;
                 await page.waitForTimeout(31000 - msNow);
-                const retryToken = speakeasy.totp({ secret: account.twoFASecret, encoding: 'base32' });
+                const retryToken = speakeasy.totp({ secret: account.twoFASecret, encoding: 'base32', window: 1 });
                 const retryInput = await page.waitForSelector('input[placeholder="One-time code"], input[placeholder="Code"]', { timeout: 10000 });
                 await retryInput.fill('');
                 await retryInput.fill(retryToken);

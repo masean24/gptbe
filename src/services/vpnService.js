@@ -187,27 +187,54 @@ async function createNamespace(nsIndex) {
     execSync(`iptables -t nat -A POSTROUTING -s ${nsVethIp}/32 -o ${defaultIface} -j MASQUERADE`);
     console.log(`[VPN] NAT aktif: ${nsVethIp} -> ${defaultIface}`);
 
+    // Pre-resolve hostname VPN di HOST agar openvpn tidak perlu DNS di dalam namespace
+    // (namespace baru isolasi network-nya terpisah, DNS mungkin belum reliable saat pertama konek)
+    let extraArgs = [];
+    try {
+        const ovpnContent = fs.readFileSync(ovpnConfig, 'utf8');
+        const remoteMatch = ovpnContent.match(/^remote\s+(\S+)\s+(\d+)/m);
+        if (remoteMatch) {
+            const hostname = remoteMatch[1];
+            const port = remoteMatch[2];
+            // Kalau sudah berupa IP, skip resolve
+            if (!/^\d+\.\d+\.\d+\.\d+$/.test(hostname)) {
+                const resolved = execSync(
+                    `getent hosts ${hostname} | awk '{print $1}' | head -1`,
+                    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
+                ).trim();
+                if (resolved) {
+                    extraArgs = ['--remote', resolved, port, '--remote-cert-tls', 'server'];
+                    console.log(`[VPN] Pre-resolved ${hostname} → ${resolved}`);
+                }
+            }
+        }
+    } catch (e) {
+        console.warn('[VPN] Pre-resolve gagal, openvpn akan resolve sendiri:', e.message);
+    }
+
     // Spawn openvpn di dalam namespace
     console.log(`[VPN] Menghubungkan ${nsName} via ${path.basename(ovpnConfig)}...`);
-    const ovpnProc = spawn('ip', [
+    const ovpnArgs = [
         'netns', 'exec', nsName,
         'openvpn',
         '--config', ovpnConfig,
         '--auth-user-pass', VPN_AUTH_FILE,
         '--daemon',
         '--log', `/tmp/vpn_${nsName}.log`,
-    ], { detached: true, stdio: 'ignore' });
+        ...extraArgs,
+    ];
+    const ovpnProc = spawn('ip', ovpnArgs, { detached: true, stdio: 'ignore' });
     ovpnProc.unref();
 
-    // Tunggu tun0 up
-    const connected = await waitForTun(nsName);
+    // Tunggu tun0 up (max 60 detik)
+    const connected = await waitForTun(nsName, 60000);
     if (!connected) {
         // Cleanup
         try { execSync(`iptables -t nat -D POSTROUTING -s ${nsVethIp}/32 -o ${defaultIface} -j MASQUERADE`, { stdio: 'ignore' }); } catch { /* ok */ }
         try { execSync(`ip link del ${vethHost}`, { stdio: 'ignore' }); } catch { /* ok */ }
         try { execSync(`ip netns del ${nsName}`); } catch { /* ok */ }
         try { execSync(`rm -rf /etc/netns/${nsName}`); } catch { /* ok */ }
-        throw new Error(`[VPN] ${nsName} gagal connect dalam 30 detik. Cek /tmp/vpn_${nsName}.log`);
+        throw new Error(`[VPN] ${nsName} gagal connect dalam 60 detik. Cek /tmp/vpn_${nsName}.log`);
     }
     console.log(`[VPN] ${nsName} terhubung ✓`);
 

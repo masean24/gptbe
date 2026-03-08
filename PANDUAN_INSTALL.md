@@ -238,7 +238,79 @@ pm2 restart gpti-bot
 
 ---
 
-## 🛠 6. Finalisasi
+## � 6. Setup VPN per-Process (Opsional tapi Disarankan)
+
+VPN dipakai agar tiap 3 akun ChatGPT pakai IP yang berbeda, mencegah ban massal.
+Kalau tidak di-setup, bot tetap jalan normal via proxy.
+
+### A. Jalankan Setup Script
+
+```bash
+cd ~/gptbe
+chmod +x setup-vpn.sh
+sudo bash setup-vpn.sh
+```
+
+### B. Download .ovpn Configs dari Surfshark
+
+1. Login ke [my.surfshark.com](https://my.surfshark.com) → **VPN** → **Manual setup** → **Router** → **OpenVPN**
+2. Tab **Locations** → klik ikon ⬇ di 2–10 server berbeda (download satu-satu)
+3. Upload ke VPS dari laptop kamu:
+   ```powershell
+   # Di PowerShell laptop
+   scp C:\Users\NamaKamu\Downloads\*.ovpn root@IP_VPS:/etc/surfshark/configs/
+   ```
+4. Cek di VPS:
+   ```bash
+   ls /etc/surfshark/configs/
+   # Harus muncul file .ovpn yang tadi diupload
+   ```
+
+> ⚠️ Kalau VPS kamu memblok UDP port 1194, download file `.ovpn` versi **TCP** dari Surfshark (ada pilihan TCP di halaman yang sama). TCP pakai port 443 yang tidak diblok.
+
+### C. Dapatkan Surfshark Service Credentials
+
+Di halaman yang sama → tab **Credentials** → copy **Username** & **Password**
+(Ini BERBEDA dari username/password login akun Surfshark kamu)
+
+### D. Tambah ke .env
+
+```bash
+nano ~/gptbe/.env
+```
+
+Tambahkan di bagian bawah:
+```env
+# ==================== VPN (Surfshark) ====================
+SURFSHARK_USER=username_dari_credentials_tab
+SURFSHARK_PASS=password_dari_credentials_tab
+SURFSHARK_CONFIGS_DIR=/etc/surfshark/configs
+# SURFSHARK_OVPN_FILES tidak perlu diisi → otomatis pakai semua file di folder
+```
+
+### E. Restart Bot
+
+```bash
+pm2 restart gpti-bot
+pm2 logs gpti-bot --lines 10
+```
+
+Kalau berhasil akan muncul:
+```
+[VPN] Aktif. X ovpn config(s). Max 3 akun/namespace.
+```
+
+### Mapping Akun → Namespace
+
+| Akun ke- | Namespace | File .ovpn |
+|---|---|---|
+| 1, 2, 3 | ns_vpn_0 | file ke-1 |
+| 4, 5, 6 | ns_vpn_1 | file ke-2 |
+| 7, 8, 9 | ns_vpn_2 | file ke-3 |
+
+---
+
+## 🛠 7. Finalisasi
 
 ### Tambah Akun ChatGPT
 
