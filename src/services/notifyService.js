@@ -113,6 +113,47 @@ async function notifyNewWebRegistration(email) {
     );
 }
 
+async function notifyGuaranteeClaim(email, tier, source = 'bot') {
+    await notify(
+        `🛡️ *GARANSI DI-CLAIM*\n${SEP}\n` +
+        `📧 \`${maskEmail(email)}\`\n` +
+        `🏷️ Tier: ${tier}  •  📱 ${source}\n` +
+        `⏳ Menunggu approval admin\n` +
+        `🕐 _${nowWIB()} WIB_`
+    );
+}
+
+async function notifyAdminCredit(targetId, amount, tier, adminId) {
+    await notify(
+        `🎁 *ADMIN BERI KREDIT*\n${SEP}\n` +
+        `👤 User: \`${targetId}\`\n` +
+        `💎 +${amount} kredit ${tier}\n` +
+        `👑 Admin: \`${adminId}\`\n` +
+        `🕐 _${nowWIB()} WIB_`
+    );
+}
+
+async function notifyAccountStatusChange(accountEmail, oldStatus, newStatus) {
+    const icon = newStatus === 'full' ? '📦' : newStatus === 'error' ? '🔴' : '✅';
+    await notify(
+        `${icon} *STATUS AKUN BERUBAH*\n${SEP}\n` +
+        `🤖 \`${maskEmail(accountEmail)}\`\n` +
+        `📊 ${oldStatus} → *${newStatus}*\n` +
+        `🕐 _${nowWIB()} WIB_`
+    );
+}
+
+async function notifySessionExpired(accountEmail, reloginSuccess) {
+    const icon = reloginSuccess ? '🔄' : '🔴';
+    const status = reloginSuccess ? 'Re-login berhasil ✅' : 'Re-login GAGAL ❌';
+    await notify(
+        `${icon} *SESSION EXPIRED*\n${SEP}\n` +
+        `🤖 \`${maskEmail(accountEmail)}\`\n` +
+        `💬 ${status}\n` +
+        `🕐 _${nowWIB()} WIB_`
+    );
+}
+
 module.exports = {
     setBot,
     notify,
@@ -122,4 +163,8 @@ module.exports = {
     notifyPaymentReceived,
     notifyNewWebOrder,
     notifyNewWebRegistration,
+    notifyGuaranteeClaim,
+    notifyAdminCredit,
+    notifyAccountStatusChange,
+    notifySessionExpired,
 };

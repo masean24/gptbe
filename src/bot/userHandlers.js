@@ -10,6 +10,7 @@ const Settings = require('../models/Settings');
 const { enqueue } = require('../services/queueService');
 const { createPayment, checkPayment, CREDIT_PRICE, TIER_PRICES, getTierPrice } = require('../services/qrisService');
 const { loginAccount } = require('../services/playwrightService');
+const { notifyGuaranteeClaim } = require('../services/notifyService');
 const { generateCodes } = require('./adminHandlers');
 
 const bot = new Bot(process.env.BOT_TOKEN);
@@ -408,6 +409,9 @@ bot.callbackQuery(/^claim_guarantee_(.+)$/, async (ctx) => {
 
         // Log activity
         await ActivityLog.create({ userId: telegramId, action: 'guarantee_claim', details: { jobId, tier: job.tier, email: job.targetEmail } }).catch(() => {});
+
+        // Notify log group
+        await notifyGuaranteeClaim(job.targetEmail, job.tier, 'bot').catch(() => {});
 
         await ctx.reply(
             `✅ *Claim Garansi Berhasil!*\n\n` +

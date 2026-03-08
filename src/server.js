@@ -16,7 +16,7 @@ const ActivityLog = require('./models/ActivityLog');
 const InviteJob = require('./models/InviteJob');
 const { handleWebhookPayload, verifyWebhookSecret, createPayment, CREDIT_PRICE, TIER_PRICES, getTierPrice, getTierGuaranteeDays } = require('./services/qrisService');
 const { enqueue } = require('./services/queueService');
-const { notifyRedeemUsed, notifyPaymentReceived, notifyNewWebOrder, notifyNewWebRegistration } = require('./services/notifyService');
+const { notifyRedeemUsed, notifyPaymentReceived, notifyNewWebOrder, notifyNewWebRegistration, notifyGuaranteeClaim, notifyAdminCredit } = require('./services/notifyService');
 const { sendRedeemCode } = require('./services/emailService');
 
 const app = express();
@@ -466,6 +466,9 @@ app.post('/api/web/user/guarantee', authMiddleware, webUserMiddleware, async (re
 
         // Log activity
         await ActivityLog.create({ userId: `webuser_${user._id}`, userEmail: user.email, action: 'guarantee_claim', details: { jobId, tier: job.tier, email: job.targetEmail }, ip: req.ip }).catch(() => {});
+
+        // Notify log group
+        await notifyGuaranteeClaim(job.targetEmail, job.tier, 'web').catch(() => {});
 
         res.json({ success: true, message: '✅ Claim garansi berhasil! Admin akan segera memproses re-invite kamu.' });
     } catch (err) {

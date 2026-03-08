@@ -5,7 +5,7 @@ const WebUser = require('../models/WebUser');
 const Transaction = require('../models/Transaction');
 const RedeemCode = require('../models/RedeemCode');
 const { inviteTeamMember } = require('./playwrightService');
-const { notifyInviteFailed, notifyInviteSuccess } = require('./notifyService');
+const { notifyInviteFailed, notifyInviteSuccess, notifyAccountStatusChange } = require('./notifyService');
 const { getTierGuaranteeDays } = require('./qrisService');
 
 /**
@@ -194,10 +194,13 @@ async function processJob(job) {
             }
         }
 
-        // Increment account invite count
         account.inviteCount += 1;
         account.lastUsed = new Date();
-        if (account.inviteCount >= account.maxInvites) account.status = 'full';
+        if (account.inviteCount >= account.maxInvites) {
+            const oldStatus = account.status;
+            account.status = 'full';
+            await notifyAccountStatusChange(account.email, oldStatus, 'full').catch(() => {});
+        }
         await account.save();
 
         // Set guarantee date
@@ -258,7 +261,10 @@ async function notifyUser(telegramId, targetEmail, reason) {
     try {
         const { bot } = require('../bot/userHandlers');
         await bot.api.sendMessage(telegramId,
-            `❌ Invite Gagal\n\n📧 Email: ${targetEmail}\n💬 Alasan: ${reason}\n\nKredit kamu tidak dikurangi. Silakan coba lagi atau hubungi admin.`
+            `❌ *Invite Gagal*\n\n` +
+            `📧 Email: \`${targetEmail}\`\n\n` +
+            `Kredit kamu *tidak dikurangi*. Silakan coba lagi nanti atau hubungi admin.`,
+            { parse_mode: 'Markdown' }
         );
     } catch (err) {
         console.error('[Queue] Failed to notify user:', err.message);

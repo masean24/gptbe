@@ -7,6 +7,7 @@ const Transaction = require('../models/Transaction');
 const InviteJob = require('../models/InviteJob');
 const Settings = require('../models/Settings');
 const { loginAccount } = require('../services/playwrightService');
+const { notifyAdminCredit } = require('../services/notifyService');
 
 const ADMIN_IDS = (process.env.ADMIN_IDS || '').split(',').map(id => id.trim()).filter(Boolean);
 
@@ -400,6 +401,38 @@ function registerAdminHandlers(bot) {
             `🎁 *Kamu mendapat ${amount} kredit ${tierLabel[tier]}!*\n\nAdmin telah menambahkan kredit ke akunmu.\n💰 Saldo: *${totalCredits} kredit*`,
             { parse_mode: 'Markdown' }
         ).catch(() => { });
+
+        // Log to admin channel
+        await notifyAdminCredit(targetId, amount, tierLabel[tier], String(ctx.from.id)).catch(() => {});
+    }));
+
+    // ---- SET PROXY PER ACCOUNT ----
+    bot.command('setproxy', adminOnly(async (ctx) => {
+        const parts = ctx.message.text.split(' ');
+        const accountEmail = parts[1];
+        const proxyUrl = parts[2] || '';
+
+        if (!accountEmail) {
+            return ctx.reply(
+                '❌ Format:\n' +
+                '`/setproxy account@email.com http://user:pass@host:port`\n' +
+                '`/setproxy account@email.com` _(kosongkan untuk hapus proxy)_',
+                { parse_mode: 'Markdown' }
+            );
+        }
+
+        const account = await Account.findOneAndUpdate(
+            { email: accountEmail },
+            { assignedProxy: proxyUrl },
+            { new: true }
+        );
+        if (!account) return ctx.reply('❌ Akun tidak ditemukan!');
+
+        if (proxyUrl) {
+            await ctx.reply(`✅ Proxy untuk \`${accountEmail}\` diset ke:\n\`${proxyUrl}\``, { parse_mode: 'Markdown' });
+        } else {
+            await ctx.reply(`✅ Proxy untuk \`${accountEmail}\` dihapus. Akan pakai proxy pool / direct.`, { parse_mode: 'Markdown' });
+        }
     }));
 
     // ---- BLOCK USER ----

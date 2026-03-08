@@ -12,6 +12,7 @@ const accountSchema = new mongoose.Schema({
     lastUsed: { type: Date, default: null },
     createdAt: { type: Date, default: Date.now },
     notes: { type: String, default: '' },
+    assignedProxy: { type: String, default: '' }, // per-account proxy, e.g. "http://user:pass@host:port"
 });
 
 accountSchema.index({ status: 1, inviteCount: 1 });

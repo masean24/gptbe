@@ -2,6 +2,8 @@ const { chromium } = require('playwright-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const speakeasy = require('speakeasy');
 const fs = require('fs');
+const Account = require('../models/Account');
+const { notifySessionExpired } = require('./notifyService');
 
 chromium.use(StealthPlugin());
 
@@ -243,7 +245,16 @@ async function loginAccount(account) {
  * Each call gets its own browser + proxy from the pool.
  */
 async function inviteTeamMember(account, targetEmail) {
-    const proxy = getNextProxy();
+    // Use per-account proxy first, fallback to proxy pool
+    const proxy = account.assignedProxy || getNextProxy();
+    return await inviteWithSession(account, targetEmail, proxy);
+}
+
+/**
+ * Internal: perform invite with current session
+ */
+async function inviteWithSession(account, targetEmail, proxy) {
+    if (!proxy && arguments.length < 3) proxy = account.assignedProxy || getNextProxy();
     const browser = await launchBrowser(proxy);
 
     let context;
@@ -273,9 +284,36 @@ async function inviteTeamMember(account, targetEmail) {
         console.log(`[Playwright][${targetEmail}] URL: ${currentUrl}`);
 
         if (currentUrl.includes('auth') || currentUrl.includes('login')) {
+            console.log(`[Playwright][${targetEmail}] Session expired! Attempting auto re-login...`);
             await sendScreenshotToAdmin(page, 'session_expired');
             await browser.close();
-            return { success: false, message: 'Session expired. Silakan login ulang akun via /loginaccount' };
+
+            // Auto re-login
+            try {
+                const loginResult = await loginAccount(account);
+                if (loginResult.success) {
+                    // Update session in DB
+                    await Account.findByIdAndUpdate(account._id, {
+                        sessionData: loginResult.sessionData,
+                        hasSession: true,
+                    });
+                    account.sessionData = loginResult.sessionData;
+                    await notifySessionExpired(account.email, true);
+                    console.log(`[Playwright][${targetEmail}] Re-login successful, retrying invite...`);
+
+                    // Retry invite with new session (non-recursive, inline)
+                    return await inviteWithSession(account, targetEmail);
+                } else {
+                    await notifySessionExpired(account.email, false);
+                    // Mark account as error
+                    await Account.findByIdAndUpdate(account._id, { status: 'error' });
+                    return { success: false, message: `Session expired. Re-login gagal: ${loginResult.message}` };
+                }
+            } catch (reloginErr) {
+                await notifySessionExpired(account.email, false);
+                await Account.findByIdAndUpdate(account._id, { status: 'error' });
+                return { success: false, message: `Session expired. Re-login error: ${reloginErr.message}` };
+            }
         }
 
         // ============ Dismiss popups ============
