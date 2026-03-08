@@ -20,8 +20,10 @@ webUserSchema.virtual('credits').get(function () {
     return this.credits_basic + this.credits_standard + this.credits_premium;
 });
 
-// Ensure virtuals are included in JSON
-webUserSchema.set('toJSON', { virtuals: true });
+webUserSchema.set('toJSON', {
+    virtuals: true,
+    transform: (doc, ret) => { delete ret.password; return ret; }
+});
 webUserSchema.set('toObject', { virtuals: true });
 
 webUserSchema.index({ email: 1 });

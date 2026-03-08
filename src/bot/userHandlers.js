@@ -103,9 +103,10 @@ bot.command('start', async (ctx) => {
         const freeCreditEnabled = await Settings.getValue('free_credit_bot', true);
         if (freeCreditEnabled) {
             const user = await User.findOne({ telegramId });
-            if (user && user.credits === 0 && user.totalInvites === 0) {
-                // First time user, give 1 free credit
-                user.credits += 1;
+            if (user && !user.freeCreditsGiven) {
+                // First time user, give 1 free basic credit
+                user.credits_basic = (user.credits_basic || 0) + 1;
+                user.freeCreditsGiven = true;
                 await user.save();
                 await Transaction.create({
                     telegramId,
@@ -243,7 +244,8 @@ bot.command(['invite', 'gpti'], async (ctx) => {
     if (!(await forceJoinCheck(ctx))) return;
 
     const args = ctx.message.text.split(' ');
-    if (args.length < 2 || !args[1].includes('@')) {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (args.length < 2 || !emailRegex.test(args[1])) {
         return ctx.reply(
             '❌ Format salah!\n\n✅ Contoh:\n`/invite john@gmail.com`',
             { parse_mode: 'Markdown' }
@@ -547,6 +549,9 @@ bot.callbackQuery(/^buypay_(basic|standard|premium)_(\d+)$/, async (ctx) => {
 
 // Remove old buy callbacks (no longer needed)
 
+// Active QRIS pollers — allows cancellation
+const activePollers = new Map();
+
 async function startPaymentPoller(chatId, telegramId, transactionId, credits, qrisMessageId, tier) {
     const maxAttempts = 90;
     let attempt = 0;
@@ -586,7 +591,7 @@ async function startPaymentPoller(chatId, telegramId, transactionId, credits, qr
             }
         } catch (_) { }
 
-        setTimeout(poll, 10000);
+        setTimeout(() => { activePollers.delete(transactionId); poll(); }, 10000);
     };
 
     // Send status message with refresh/cancel buttons
@@ -598,7 +603,17 @@ async function startPaymentPoller(chatId, telegramId, transactionId, credits, qr
         { parse_mode: 'Markdown', reply_markup: statusKeyboard }
     ).catch(() => {});
 
-    setTimeout(poll, 10000);
+    const timerId = setTimeout(poll, 10000);
+    activePollers.set(transactionId, timerId);
+}
+
+// Helper: stop poller
+function stopPoller(transactionId) {
+    const timerId = activePollers.get(transactionId);
+    if (timerId) {
+        clearTimeout(timerId);
+        activePollers.delete(transactionId);
+    }
 }
 
 // QRIS manual check status callback
@@ -620,6 +635,8 @@ bot.callbackQuery(/^qris_check_(.+)$/, async (ctx) => {
 
 // QRIS cancel callback
 bot.callbackQuery(/^qris_cancel_(.+)$/, async (ctx) => {
+    const transactionId = ctx.match[1];
+    stopPoller(transactionId);
     await ctx.answerCallbackQuery({ text: 'Dibatalkan' });
     await ctx.reply('❌ Pembayaran dibatalkan. Gunakan /beli untuk membuat QRIS baru.',
         { reply_markup: menuKeyboard });
@@ -653,25 +670,32 @@ bot.command('redeem', async (ctx) => {
     code.usedAt = new Date();
     await code.save();
 
+    const codeTier = code.tier || 'basic';
+    const creditField = `credits_${codeTier}`;
+
     const user = await User.findOneAndUpdate(
         { telegramId },
-        { $inc: { credits: code.credits } },
+        { $inc: { [creditField]: code.credits } },
         { new: true }
     );
+
+    const totalCredits = (user.credits_basic || 0) + (user.credits_standard || 0) + (user.credits_premium || 0);
+    const tierLabel = { basic: 'Basic', standard: 'Standard', premium: 'Premium' };
 
     await Transaction.create({
         telegramId,
         type: 'redeem',
         credits: code.credits,
+        tier: codeTier,
         redeemCode: codeInput,
-        description: `Redeem code ${codeInput} (+${code.credits} kredit)`,
+        description: `Redeem code ${codeInput} (+${code.credits} kredit ${tierLabel[codeTier]})`,
     });
 
     await ctx.reply(
         `🎉 *Redeem Berhasil!*\n\n` +
         `🎟️ Kode: \`${codeInput}\`\n` +
-        `💎 +${code.credits} kredit ditambahkan!\n\n` +
-        `💰 Saldo sekarang: *${user.credits} kredit*\n\n` +
+        `💎 +${code.credits} kredit ${tierLabel[codeTier]} ditambahkan!\n\n` +
+        `💰 Saldo sekarang: *${totalCredits} kredit*\n\n` +
         `Gunakan /invite email@example.com untuk mulai invite!`,
         { parse_mode: 'Markdown', reply_markup: menuKeyboard }
     );

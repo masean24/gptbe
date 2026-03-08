@@ -8,6 +8,7 @@ const redeemCodeSchema = new mongoose.Schema({
     usedAt: { type: Date, default: null },
     createdBy: { type: String, default: 'admin' }, // telegramId of admin
     note: { type: String, default: '' },
+    tier: { type: String, enum: ['basic', 'standard', 'premium'], default: 'basic' },
     createdAt: { type: Date, default: Date.now },
     expiresAt: { type: Date, default: null },
 });

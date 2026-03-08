@@ -168,6 +168,9 @@ app.get('/api/web/auth/me', authMiddleware, webUserMiddleware, async (req, res) 
             id: user._id,
             email: user.email,
             credits: user.credits,
+            credits_basic: user.credits_basic,
+            credits_standard: user.credits_standard,
+            credits_premium: user.credits_premium,
             totalInvites: user.totalInvites,
             isApproved: user.isApproved,
             freeCreditsGiven: user.freeCreditsGiven,
@@ -267,30 +270,35 @@ app.post('/api/web/user/redeem', authMiddleware, webUserMiddleware, async (req, 
         codeDoc.usedAt = new Date();
         await codeDoc.save();
 
-        // Add credits to basic tier
-        user.credits_basic += codeDoc.credits;
+        // Add credits to code's tier
+        const codeTier = codeDoc.tier || 'basic';
+        const creditField = `credits_${codeTier}`;
+        user[creditField] = (user[creditField] || 0) + codeDoc.credits;
         await user.save();
+
+        const tierLabel = { basic: 'Basic', standard: 'Standard', premium: 'Premium' };
 
         // Log transaction
         await Transaction.create({
             telegramId: `webuser_${user._id}`,
             type: 'redeem',
             credits: codeDoc.credits,
-            tier: 'basic',
+            tier: codeTier,
             redeemCode: code.toUpperCase(),
-            description: `Redeem code ${code.toUpperCase()} (+${codeDoc.credits} kredit basic)`,
+            description: `Redeem code ${code.toUpperCase()} (+${codeDoc.credits} kredit ${tierLabel[codeTier]})`,
         });
 
         // Log activity
-        await ActivityLog.create({ userId: `webuser_${user._id}`, userEmail: user.email, action: 'redeem', details: { code: code.toUpperCase(), credits: codeDoc.credits, tier: 'basic' }, ip: req.ip }).catch(() => {});
+        await ActivityLog.create({ userId: `webuser_${user._id}`, userEmail: user.email, action: 'redeem', details: { code: code.toUpperCase(), credits: codeDoc.credits, tier: codeTier }, ip: req.ip }).catch(() => {});
 
         await notifyRedeemUsed(code.toUpperCase(), codeDoc.credits, 'web');
 
         res.json({
             success: true,
             creditsAdded: codeDoc.credits,
+            tier: codeTier,
             newBalance: user.credits,
-            message: `✅ +${codeDoc.credits} kredit basic berhasil ditambahkan!`,
+            message: `✅ +${codeDoc.credits} kredit ${tierLabel[codeTier]} berhasil ditambahkan!`,
         });
     } catch (err) {
         console.error('[Web Redeem] Error:', err.message);
@@ -318,22 +326,8 @@ app.post('/api/web/user/invite', authMiddleware, webUserMiddleware, async (req, 
         const account = await Account.findOne({ status: 'active', $expr: { $lt: ['$inviteCount', '$maxInvites'] } });
         if (!account) return res.status(503).json({ error: 'Semua akun sedang penuh. Coba lagi nanti.' });
 
-        // Deduct tier-specific credit
-        user[creditField] -= 1;
-        user.totalInvites += 1;
-        await user.save();
-
+        // DON'T deduct credit here — queueService.processJob() handles credit check+deduction atomically for web users too
         const tierLabel = { basic: 'Basic', standard: 'Standard (14 hari garansi)', premium: 'Premium (30 hari garansi)' };
-
-        // Log transaction
-        await Transaction.create({
-            telegramId: `webuser_${user._id}`,
-            type: 'invite_used',
-            credits: -1,
-            tier,
-            invitedEmail: targetEmail,
-            description: `Invite ${targetEmail} [${tierLabel[tier]}]`,
-        });
 
         // Log activity
         await ActivityLog.create({ userId: `webuser_${user._id}`, userEmail: user.email, action: 'invite', details: { email: targetEmail, tier }, ip: req.ip }).catch(() => {});
@@ -348,7 +342,6 @@ app.post('/api/web/user/invite', authMiddleware, webUserMiddleware, async (req, 
             jobId,
             position,
             tier,
-            newBalance: user.credits,
             message: position > 1
                 ? `✅ Antrian ke-${position}. Email ${targetEmail} akan segera diinvite. (${tierLabel[tier]})`
                 : `✅ Sedang diproses! Email ${targetEmail} akan segera diinvite. (${tierLabel[tier]})`,
@@ -391,44 +384,20 @@ app.post('/api/web/user/pay', authMiddleware, webUserMiddleware, async (req, res
     }
 });
 
-// =========================================================
-// Web User: Guarantee claim
-// =========================================================
-app.post('/api/web/user/guarantee', authMiddleware, webUserMiddleware, async (req, res) => {
-    try {
-        const { jobId } = req.body;
-        if (!jobId) return res.status(400).json({ error: 'Job ID diperlukan' });
-
-        const user = await WebUser.findById(req.user.webUserId);
-        if (!user) return res.status(404).json({ error: 'User tidak ditemukan' });
-
-        const job = await InviteJob.findOne({ _id: jobId, telegramId: `webuser_${user._id}`, status: 'done' });
-        if (!job) return res.status(404).json({ error: 'Invite job tidak ditemukan' });
-        if (job.tier === 'basic') return res.status(400).json({ error: 'Tier basic tidak memiliki garansi' });
-        if (!job.guaranteeUntil || new Date() > job.guaranteeUntil) return res.status(400).json({ error: 'Masa garansi sudah berakhir' });
-        if (job.guaranteeClaimed) return res.status(400).json({ error: 'Garansi sudah pernah di-claim' });
-
-        // Mark as claimed — admin will approve and re-invite
-        job.guaranteeClaimed = true;
-        await job.save();
-
-        // Log activity
-        await ActivityLog.create({ userId: `webuser_${user._id}`, userEmail: user.email, action: 'guarantee_claim', details: { jobId, tier: job.tier, email: job.targetEmail }, ip: req.ip }).catch(() => {});
-
-        res.json({ success: true, message: '✅ Claim garansi berhasil! Admin akan segera memproses re-invite kamu.' });
-    } catch (err) {
-        console.error('[Guarantee] Error:', err.message);
-        res.status(500).json({ error: 'Gagal claim garansi' });
-    }
-});
+// (Guarantee claim handled by the endpoint below at line ~480)
 
 // =========================================================
 // PUBLIC: Check payment status
 // =========================================================
-app.get('/api/web/pay/status/:transactionId', async (req, res) => {
+app.get('/api/web/pay/status/:transactionId', authMiddleware, async (req, res) => {
     const { transactionId } = req.params;
     const txn = await Transaction.findOne({ qrisTransactionId: transactionId, type: 'qris' });
     if (!txn) return res.status(404).json({ error: 'Transaksi tidak ditemukan' });
+
+    // Verify ownership: match user id from token to transaction
+    if (req.user?.webUserId && txn.telegramId !== `webuser_${req.user.webUserId}`) {
+        return res.status(403).json({ error: 'Unauthorized' });
+    }
 
     if (txn.qrisStatus === 'pending') {
         const ageMs = Date.now() - new Date(txn.createdAt).getTime();
@@ -444,7 +413,7 @@ app.get('/api/web/pay/status/:transactionId', async (req, res) => {
 // =========================================================
 // PUBLIC: Check invite job status
 // =========================================================
-app.get('/api/web/job/:jobId', async (req, res) => {
+app.get('/api/web/job/:jobId', authMiddleware, async (req, res) => {
     const { jobId } = req.params;
     try {
         const job = await InviteJob.findById(jobId);
@@ -548,9 +517,9 @@ app.post('/api/webhooks/qris', async (req, res) => {
                 }
                 await notifyPaymentReceived(result.amount || CREDIT_PRICE, result.creditsAdded || 1, 'web-dashboard');
             } else if (result.telegramId && result.telegramId.startsWith('web_')) {
-                const email = result.telegramId.replace('web_', '');
-                await enqueue(result.telegramId, email);
-                await notifyPaymentReceived(result.amount || CREDIT_PRICE, result.creditsAdded || 1, 'web');
+                // Legacy web flow — telegramId is web_<timestamp>, not an email
+                // Cannot auto-enqueue, just log payment
+                await notifyPaymentReceived(result.amount || CREDIT_PRICE, result.creditsAdded || 1, 'web-legacy');
             } else {
                 // Telegram user — notify via bot
                 try {
@@ -558,7 +527,7 @@ app.post('/api/webhooks/qris', async (req, res) => {
                     const tier = result.tier || 'basic';
                     const tierLabel = { basic: 'Basic', standard: 'Standard', premium: 'Premium' };
                     await bot.api.sendMessage(result.telegramId,
-                        `✅ *Pembayaran Diterima!*\n\n💎 +${result.creditsAdded} kredit ${tierLabel[tier]} telah ditambahkan!\n💰 Saldo: *${result.newBalance} kredit*\n\nGunakan /gpti email@example.com untuk invite sekarang!`,
+                        `✅ *Pembayaran Diterima!*\n\n💎 +${result.creditsAdded} kredit ${tierLabel[tier]} telah ditambahkan!\n💰 Saldo: *${result.newBalance} kredit*\n\nGunakan /invite email@example.com untuk invite sekarang!`,
                         { parse_mode: 'Markdown' }
                     );
                     await notifyPaymentReceived(result.amount || CREDIT_PRICE, result.creditsAdded, 'telegram');
@@ -648,7 +617,18 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
     const adminPassword = process.env.ADMIN_PASSWORD;
     if (!adminPassword) return res.status(500).json({ error: 'Admin password not configured' });
 
-    if (username !== adminUsername || password !== adminPassword) {
+    if (username !== adminUsername) {
+        return res.status(403).json({ error: 'Username atau password salah' });
+    }
+
+    // Support both bcrypt hash and plaintext password
+    let passwordMatch = false;
+    if (adminPassword.startsWith('$2')) {
+        passwordMatch = await bcrypt.compare(password, adminPassword);
+    } else {
+        passwordMatch = password === adminPassword;
+    }
+    if (!passwordMatch) {
         return res.status(403).json({ error: 'Username atau password salah' });
     }
 
@@ -678,21 +658,24 @@ app.get('/api/admin/stats', authMiddleware, adminMiddleware, async (req, res) =>
 app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) => {
     const { page = 1, limit = 20, search } = req.query;
     const query = search ? { $or: [{ username: { $regex: search, $options: 'i' } }, { telegramId: search }] } : {};
-    const users = await User.find(query).sort({ credits: -1 }).skip((page - 1) * limit).limit(parseInt(limit));
+    const users = await User.find(query).sort({ credits_basic: -1, credits_standard: -1, credits_premium: -1 }).skip((page - 1) * limit).limit(parseInt(limit));
     const total = await User.countDocuments(query);
     res.json({ users, total, page: parseInt(page), limit: parseInt(limit) });
 });
 
 app.post('/api/admin/users/:telegramId/credits', authMiddleware, adminMiddleware, async (req, res) => {
-    const { amount, action } = req.body;
+    const { amount, action, tier } = req.body;
+    const validTier = ['basic', 'standard', 'premium'].includes(tier) ? tier : 'basic';
+    const creditField = `credits_${validTier}`;
     const user = await User.findOneAndUpdate(
         { telegramId: req.params.telegramId },
-        action === 'set' ? { $set: { credits: amount } } : { $inc: { credits: amount } },
+        action === 'set' ? { $set: { [creditField]: amount } } : { $inc: { [creditField]: amount } },
         { new: true }
     );
     if (!user) return res.status(404).json({ error: 'User not found' });
-    await Transaction.create({ telegramId: req.params.telegramId, type: 'admin_gift', credits: amount, description: `Admin ${action === 'set' ? 'set' : 'gift'} ${amount} kredit` });
-    res.json({ success: true, newBalance: user.credits });
+    const totalCredits = (user.credits_basic || 0) + (user.credits_standard || 0) + (user.credits_premium || 0);
+    await Transaction.create({ telegramId: req.params.telegramId, type: 'admin_gift', credits: amount, description: `Admin ${action === 'set' ? 'set' : 'gift'} ${amount} kredit ${validTier}` });
+    res.json({ success: true, newBalance: totalCredits });
 });
 
 app.get('/api/admin/accounts', authMiddleware, adminMiddleware, async (req, res) => {
@@ -745,7 +728,7 @@ app.post('/api/admin/broadcast', authMiddleware, adminMiddleware, async (req, re
         try {
             await bot.api.sendMessage(user.telegramId, `📢 *PENGUMUMAN*\n\n${message}`, { parse_mode: 'Markdown' });
             sent++;
-            await new Promise(r => setTimeout(r, 50));
+            await new Promise(r => setTimeout(r, 100)); // 100ms delay to avoid Telegram rate limit
         } catch (_) { failed++; }
     }
     res.json({ success: true, sent, failed, total: users.length });

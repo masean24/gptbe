@@ -9,6 +9,7 @@ const userSchema = new mongoose.Schema({
     credits_standard: { type: Number, default: 0, min: 0 },
     credits_premium: { type: Number, default: 0, min: 0 },
     totalInvites: { type: Number, default: 0 },
+    freeCreditsGiven: { type: Boolean, default: false },
     isBlocked: { type: Boolean, default: false },
     createdAt: { type: Date, default: Date.now },
     lastActivityAt: { type: Date, default: Date.now },
@@ -20,5 +21,9 @@ userSchema.virtual('credits').get(function () {
 });
 
 userSchema.index({ telegramId: 1 });
+
+// Ensure virtuals are included in JSON
+userSchema.set('toJSON', { virtuals: true });
+userSchema.set('toObject', { virtuals: true });
 
 module.exports = mongoose.model('User', userSchema);

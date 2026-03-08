@@ -37,6 +37,21 @@ async function main() {
     // Resume any stuck queued jobs
     const { processQueue } = require('./services/queueService');
     processQueue();
+
+    // Graceful shutdown
+    const shutdown = async (signal) => {
+        console.log(`\n🛑 ${signal} received. Shutting down gracefully...`);
+        try {
+            await bot.stop();
+            await mongoose.disconnect();
+            console.log('✅ Cleanup complete.');
+        } catch (err) {
+            console.error('❌ Shutdown error:', err.message);
+        }
+        process.exit(0);
+    };
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
 main().catch((err) => {

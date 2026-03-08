@@ -355,7 +355,7 @@ function registerAdminHandlers(bot) {
     bot.callbackQuery('adm_addcredit', adminOnly(async (ctx) => {
         await ctx.answerCallbackQuery();
         await ctx.editMessageText(
-            `💎 *BERI KREDIT KE USER*\n\nFormat perintah:\n\`/addcredit <telegram_id> <jumlah>\`\n\nContoh:\n\`/addcredit 123456789 5\``,
+            `💎 *BERI KREDIT KE USER*\n\nFormat perintah:\n\`/addcredit <telegram_id> <jumlah> [tier]\`\n\nTier: basic (default), standard, premium\n\nContoh:\n\`/addcredit 123456789 5\` → Basic\n\`/addcredit 123456789 3 standard\`\n\`/addcredit 123456789 2 premium\``,
             { parse_mode: 'Markdown', reply_markup: new InlineKeyboard().text('⬅️ Kembali', 'adm_back') }
         );
     }));
@@ -364,30 +364,40 @@ function registerAdminHandlers(bot) {
         const parts = ctx.message.text.split(' ');
         const targetId = parts[1];
         const amount = parseInt(parts[2]);
+        const tier = ['basic', 'standard', 'premium'].includes(parts[3]) ? parts[3] : 'basic';
+        const creditField = `credits_${tier}`;
 
         if (!targetId || isNaN(amount) || amount < 1) {
-            return ctx.reply('❌ Format: `/addcredit <telegram_id> <jumlah>`', { parse_mode: 'Markdown' });
+            return ctx.reply('❌ Format: `/addcredit <telegram_id> <jumlah> [basic|standard|premium]`', { parse_mode: 'Markdown' });
         }
 
         const user = await User.findOneAndUpdate(
             { telegramId: targetId },
-            { $inc: { credits: amount } },
+            { $inc: { [creditField]: amount } },
             { new: true }
         );
         if (!user) return ctx.reply('❌ User tidak ditemukan!');
+
+        const totalCredits = (user.credits_basic || 0) + (user.credits_standard || 0) + (user.credits_premium || 0);
+        const tierLabel = { basic: 'Basic', standard: 'Standard', premium: 'Premium' };
 
         await Transaction.create({
             telegramId: targetId,
             type: 'admin_gift',
             credits: amount,
-            description: `Admin gift ${amount} kredit dari ${ctx.from.id}`,
+            description: `Admin gift ${amount} kredit ${tierLabel[tier]} dari ${ctx.from.id}`,
         });
 
-        await ctx.reply(`✅ Berhasil menambahkan *${amount} kredit* ke user \`${targetId}\`\nSaldo baru: *${user.credits} kredit*`, { parse_mode: 'Markdown' });
+        await ctx.reply(
+            `✅ Berhasil menambahkan *${amount} kredit ${tierLabel[tier]}* ke user \`${targetId}\`\n` +
+            `Saldo baru: Basic *${user.credits_basic || 0}* | Standard *${user.credits_standard || 0}* | Premium *${user.credits_premium || 0}*\n` +
+            `Total: *${totalCredits} kredit*`,
+            { parse_mode: 'Markdown' }
+        );
 
         // Notify user
         await bot.api.sendMessage(targetId,
-            `🎁 *Kamu mendapat ${amount} kredit!*\n\nAdmin telah menambahkan kredit ke akunmu.\n💰 Saldo: *${user.credits} kredit*`,
+            `🎁 *Kamu mendapat ${amount} kredit ${tierLabel[tier]}!*\n\nAdmin telah menambahkan kredit ke akunmu.\n💰 Saldo: *${totalCredits} kredit*`,
             { parse_mode: 'Markdown' }
         ).catch(() => { });
     }));

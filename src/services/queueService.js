@@ -1,6 +1,7 @@
 const InviteJob = require('../models/InviteJob');
 const Account = require('../models/Account');
 const User = require('../models/User');
+const WebUser = require('../models/WebUser');
 const Transaction = require('../models/Transaction');
 const RedeemCode = require('../models/RedeemCode');
 const { inviteTeamMember } = require('./playwrightService');
@@ -11,8 +12,12 @@ const { getTierGuaranteeDays } = require('./qrisService');
  * If a web order used a redeem code and the invite failed,
  * un-redeem the code so the user can try again.
  */
+function isWebOrder(telegramId) {
+    return telegramId.startsWith('web_') || telegramId.startsWith('webuser_');
+}
+
 async function refundWebRedeem(telegramId) {
-    if (!telegramId.startsWith('web_')) return;
+    if (!isWebOrder(telegramId)) return;
 
     const redeemTxn = await Transaction.findOne({
         telegramId,
@@ -112,13 +117,24 @@ async function processQueue() {
 
 async function processJob(job) {
     const { telegramId, targetEmail, tier } = job;
-    const isWebOrder = telegramId.startsWith('web_');
+    const isWeb = isWebOrder(telegramId);
 
-    // For Telegram users, check tier-specific credits
-    if (!isWebOrder) {
-        const user = await User.findOne({ telegramId });
-        const creditField = `credits_${tier || 'basic'}`;
-        if (!user || (user[creditField] || 0) < 1) {
+    // Check tier-specific credits
+    const creditField = `credits_${tier || 'basic'}`;
+    if (isWeb) {
+        // Web user (webuser_ prefix)
+        const webUserId = telegramId.replace('webuser_', '');
+        const webUser = await WebUser.findOne({ _id: webUserId, [creditField]: { $gte: 1 } });
+        if (!webUser) {
+            job.status = 'failed';
+            job.result = 'credits_insufficient';
+            await job.save();
+            return;
+        }
+    } else {
+        // Telegram user
+        const user = await User.findOne({ telegramId, [creditField]: { $gte: 1 } });
+        if (!user) {
             job.status = 'failed';
             job.result = 'credits_insufficient';
             await job.save();
@@ -145,14 +161,37 @@ async function processJob(job) {
     console.log(`[Queue] Invite result for ${targetEmail}:`, JSON.stringify(result));
 
     if (result.success) {
-        // Deduct tier-specific credit for Telegram users
-        if (!isWebOrder) {
-            const creditField = `credits_${tier || 'basic'}`;
-            const user = await User.findOne({ telegramId });
-            user[creditField] = Math.max(0, (user[creditField] || 0) - 1);
-            user.totalInvites += 1;
-            user.lastActivityAt = new Date();
-            await user.save();
+        // Deduct tier-specific credit
+        const creditField = `credits_${tier || 'basic'}`;
+        if (isWeb) {
+            // WebUser atomic deduction
+            const webUserId = telegramId.replace('webuser_', '');
+            const webUser = await WebUser.findOneAndUpdate(
+                { _id: webUserId, [creditField]: { $gte: 1 } },
+                { $inc: { [creditField]: -1, totalInvites: 1 } },
+                { new: true }
+            );
+            if (!webUser) {
+                job.status = 'failed';
+                job.result = 'credits_insufficient';
+                await job.save();
+                return;
+            }
+        } else {
+            // Telegram User atomic deduction
+            const user = await User.findOneAndUpdate(
+                { telegramId, [creditField]: { $gte: 1 } },
+                { $inc: { [creditField]: -1, totalInvites: 1 }, $set: { lastActivityAt: new Date() } },
+                { new: true }
+            );
+            if (!user) {
+                job.status = 'failed';
+                job.result = 'credits_insufficient';
+                await job.save();
+                await notifyInviteFailed(targetEmail, 'Kredit habis saat proses');
+                await notifyUser(telegramId, targetEmail, 'Kredit habis saat proses invite');
+                return;
+            }
         }
 
         // Increment account invite count
@@ -189,7 +228,7 @@ async function processJob(job) {
         await notifyInviteSuccess(targetEmail, account.email);
 
         // Notify Telegram user via bot
-        if (!isWebOrder) {
+        if (!isWeb) {
             try {
                 const { bot } = require('../bot/userHandlers');
                 const guaranteeMsg = guaranteeDays > 0
@@ -215,7 +254,7 @@ async function processJob(job) {
  * Notify the user via Telegram when invite fails
  */
 async function notifyUser(telegramId, targetEmail, reason) {
-    if (telegramId.startsWith('web_')) return;
+    if (isWebOrder(telegramId)) return;
     try {
         const { bot } = require('../bot/userHandlers');
         await bot.api.sendMessage(telegramId,
