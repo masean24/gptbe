@@ -563,7 +563,11 @@ async function startPaymentPoller(chatId, telegramId, transactionId, credits, qr
     };
 
     const poll = async () => {
+        // Check if cancelled
+        if (!activePollers.has(transactionId)) return;
+
         if (attempt >= maxAttempts) {
+            activePollers.delete(transactionId);
             await deleteQris();
             await bot.api.sendMessage(telegramId, '⚠️ QRIS kamu sudah expired. Silakan /beli lagi untuk membuat QRIS baru.',
                 { reply_markup: menuKeyboard }).catch(() => { });
@@ -573,6 +577,7 @@ async function startPaymentPoller(chatId, telegramId, transactionId, credits, qr
         try {
             const txn = await checkPayment(transactionId);
             if (txn?.status === 'paid') {
+                activePollers.delete(transactionId);
                 await deleteQris();
                 const tierLabel = { basic: 'Basic', standard: 'Standard', premium: 'Premium' };
                 await bot.api.sendMessage(telegramId,
@@ -584,6 +589,7 @@ async function startPaymentPoller(chatId, telegramId, transactionId, credits, qr
                 return;
             }
             if (txn?.status === 'expired') {
+                activePollers.delete(transactionId);
                 await deleteQris();
                 await bot.api.sendMessage(telegramId, '⚠️ QRIS kamu sudah expired. Silakan /beli lagi untuk membuat QRIS baru.',
                     { reply_markup: menuKeyboard });
@@ -591,7 +597,8 @@ async function startPaymentPoller(chatId, telegramId, transactionId, credits, qr
             }
         } catch (_) { }
 
-        setTimeout(() => { activePollers.delete(transactionId); poll(); }, 10000);
+        const nextTimer = setTimeout(poll, 10000);
+        activePollers.set(transactionId, nextTimer);
     };
 
     // Send status message with refresh/cancel buttons
