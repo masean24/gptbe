@@ -283,8 +283,12 @@ async function inviteWithSession(account, targetEmail, proxy) {
         const currentUrl = page.url();
         console.log(`[Playwright][${targetEmail}] URL: ${currentUrl}`);
 
-        if (currentUrl.includes('auth') || currentUrl.includes('login')) {
-            console.log(`[Playwright][${targetEmail}] Session expired! Attempting auto re-login...`);
+        // Check for session expired: URL redirect OR modal overlay
+        const sessionExpiredModal = await page.locator('#modal-expired-session').count().catch(() => 0);
+        const isSessionExpired = currentUrl.includes('auth') || currentUrl.includes('login') || sessionExpiredModal > 0;
+
+        if (isSessionExpired) {
+            console.log(`[Playwright][${targetEmail}] Session expired! (URL: ${currentUrl}, modal: ${sessionExpiredModal > 0}). Attempting auto re-login...`);
             await sendScreenshotToAdmin(page, 'session_expired');
             await browser.close();
 

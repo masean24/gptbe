@@ -36,6 +36,16 @@ function maskCode(code) {
     return [...parts.slice(0, -1), masked].join('-');
 }
 
+/** Escape Markdown special characters for Telegram */
+function escapeMarkdown(text) {
+    if (!text) return '';
+    return String(text)
+        .replace(/[_*`\[\]()~>#+=|{}.!-]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 200);
+}
+
 async function notify(text) {
     if (!_bot || !LOG_CHAT_ID) return;
     try {
@@ -69,10 +79,11 @@ async function notifyInviteSuccess(email, accountEmail) {
 }
 
 async function notifyInviteFailed(email, reason) {
+    const safeReason = escapeMarkdown(reason);
     await notify(
         `❌ *INVITE GAGAL*\n${SEP}\n` +
         `📧 \`${maskEmail(email)}\`\n` +
-        `💬 ${reason}\n` +
+        `💬 ${safeReason}\n` +
         `🕐 _${nowWIB()} WIB_`
     );
 }
