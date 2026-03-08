@@ -209,13 +209,41 @@ async function loginAccount(account) {
         if (currentUrlAfterPassword.includes('mfa-challenge')) {
             console.log(`[Login][${account.email}] Step 4: 2FA detected...`);
             if (!account.twoFASecret) throw new Error('Akun memiliki 2FA tapi twoFASecret tidak diisi di database');
-            const token = speakeasy.totp({ secret: account.twoFASecret, encoding: 'base32' });
+
             const codeInput = await page.waitForSelector('input[placeholder="One-time code"], input[placeholder="Code"]', { timeout: 15000 });
-            await randomDelay(1000, 2000);
+
+            // Pastikan kode TOTP tidak di-generate di ujung window (< 5 detik tersisa)
+            // Satu window = 30 detik. Kalau tersisa < 5 detik → tunggu window berikutnya.
+            const msInWindow = Date.now() % 30000;
+            if (msInWindow > 25000) {
+                const waitMs = 31000 - msInWindow;
+                console.log(`[Login][${account.email}] Step 4: Menunggu TOTP window baru (${Math.ceil(waitMs / 1000)}s)...`);
+                await page.waitForTimeout(waitMs);
+            }
+
+            // Generate token LANGSUNG sebelum fill — minimal delay
+            const token = speakeasy.totp({ secret: account.twoFASecret, encoding: 'base32' });
+            console.log(`[Login][${account.email}] Step 4: Mengisi kode 2FA...`);
             await codeInput.fill(token);
-            await randomDelay(1500, 3000);
+            await page.waitForTimeout(500);
             await page.click('button:has-text("Continue")');
-            await randomDelay(5000, 8000);
+            await randomDelay(4000, 6000);
+
+            // Cek apakah kode salah (Incorrect code) → retry sekali dengan kode baru
+            const pageTextAfter2fa = (await page.textContent('body'))?.toLowerCase() || '';
+            if (pageTextAfter2fa.includes('incorrect') || pageTextAfter2fa.includes('invalid')) {
+                console.log(`[Login][${account.email}] Step 4: Kode 2FA salah, menunggu window baru + retry...`);
+                // Tunggu window berikutnya pasti
+                const msNow = Date.now() % 30000;
+                await page.waitForTimeout(31000 - msNow);
+                const retryToken = speakeasy.totp({ secret: account.twoFASecret, encoding: 'base32' });
+                const retryInput = await page.waitForSelector('input[placeholder="One-time code"], input[placeholder="Code"]', { timeout: 10000 });
+                await retryInput.fill('');
+                await retryInput.fill(retryToken);
+                await page.waitForTimeout(500);
+                await page.click('button:has-text("Continue")');
+                await randomDelay(5000, 8000);
+            }
         }
 
         // Tunggu redirect ke chatgpt.com
