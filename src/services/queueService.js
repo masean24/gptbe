@@ -5,6 +5,7 @@ const WebUser = require('../models/WebUser');
 const Transaction = require('../models/Transaction');
 const RedeemCode = require('../models/RedeemCode');
 const { inviteTeamMember } = require('./playwrightService');
+const { getOrCreateNamespace, releaseAccount } = require('./vpnService');
 const { notifyInviteFailed, notifyInviteSuccess, notifyAccountStatusChange } = require('./notifyService');
 const { getTierGuaranteeDays } = require('./qrisService');
 
@@ -115,14 +116,30 @@ async function processQueue() {
     }
 }
 
+/**
+ * Atomic account reservation with spillover logic.
+ * - Filter: status active AND (inviteCount + reservedSlots) < maxInvites
+ * - Sort: inviteCount DESC → fill-first (pakai akun paling penuh dulu)
+ * - $inc reservedSlots secara atomic untuk prevent race condition
+ */
+async function getAccountForJob() {
+    return Account.findOneAndUpdate(
+        {
+            status: 'active',
+            $expr: { $lt: [{ $add: ['$inviteCount', '$reservedSlots'] }, '$maxInvites'] },
+        },
+        { $inc: { reservedSlots: 1 } },
+        { sort: { inviteCount: -1 }, new: true }
+    );
+}
+
 async function processJob(job) {
     const { telegramId, targetEmail, tier } = job;
     const isWeb = isWebOrder(telegramId);
 
-    // Check tier-specific credits
+    // Periksa kredit sebelum reservasi akun
     const creditField = `credits_${tier || 'basic'}`;
     if (isWeb) {
-        // Web user (webuser_ prefix)
         const webUserId = telegramId.replace('webuser_', '');
         const webUser = await WebUser.findOne({ _id: webUserId, [creditField]: { $gte: 1 } });
         if (!webUser) {
@@ -132,7 +149,6 @@ async function processJob(job) {
             return;
         }
     } else {
-        // Telegram user
         const user = await User.findOne({ telegramId, [creditField]: { $gte: 1 } });
         if (!user) {
             job.status = 'failed';
@@ -144,8 +160,8 @@ async function processJob(job) {
         }
     }
 
-    // Get available ChatGPT account
-    const account = await Account.findOne({ status: 'active', $expr: { $lt: ['$inviteCount', '$maxInvites'] } });
+    // Reservasi akun secara atomic — spillover otomatis ke akun lain
+    const account = await getAccountForJob();
     if (!account) {
         job.status = 'failed';
         job.result = 'no_account_available';
@@ -155,16 +171,28 @@ async function processJob(job) {
         return;
     }
 
-    // Do the invite via Playwright
-    console.log(`[Queue] Starting invite for ${targetEmail} using account ${account.email} (tier: ${tier})`);
-    const result = await inviteTeamMember(account, targetEmail);
-    console.log(`[Queue] Invite result for ${targetEmail}:`, JSON.stringify(result));
+    // Assign VPN namespace (fallback ke proxy biasa kalau gagal)
+    let nsName = null;
+    try {
+        nsName = await getOrCreateNamespace(account._id);
+        if (nsName) console.log(`[Queue] VPN namespace: ${nsName} → akun ${account.email}`);
+    } catch (vpnErr) {
+        console.warn('[Queue] VPN setup gagal, fallback ke proxy:', vpnErr.message);
+    }
+
+    // Jalankan invite — reservedSlots SELALU di-decrement di finally, apapun yang terjadi
+    let result;
+    try {
+        console.log(`[Queue] Starting invite for ${targetEmail} using account ${account.email} (tier: ${tier}${nsName ? ', vpn: ' + nsName : ''})`);
+        result = await inviteTeamMember(account, targetEmail, nsName);
+        console.log(`[Queue] Invite result for ${targetEmail}:`, JSON.stringify(result));
+    } finally {
+        await Account.findByIdAndUpdate(account._id, { $inc: { reservedSlots: -1 } }).catch(() => {});
+    }
 
     if (result.success) {
-        // Deduct tier-specific credit
-        const creditField = `credits_${tier || 'basic'}`;
+        // Deduct kredit secara atomic
         if (isWeb) {
-            // WebUser atomic deduction
             const webUserId = telegramId.replace('webuser_', '');
             const webUser = await WebUser.findOneAndUpdate(
                 { _id: webUserId, [creditField]: { $gte: 1 } },
@@ -178,7 +206,6 @@ async function processJob(job) {
                 return;
             }
         } else {
-            // Telegram User atomic deduction
             const user = await User.findOneAndUpdate(
                 { telegramId, [creditField]: { $gte: 1 } },
                 { $inc: { [creditField]: -1, totalInvites: 1 }, $set: { lastActivityAt: new Date() } },
@@ -194,14 +221,18 @@ async function processJob(job) {
             }
         }
 
-        account.inviteCount += 1;
-        account.lastUsed = new Date();
-        if (account.inviteCount >= account.maxInvites) {
-            const oldStatus = account.status;
-            account.status = 'full';
-            await notifyAccountStatusChange(account.email, oldStatus, 'full').catch(() => {});
+        // Increment inviteCount secara atomic (reservedSlots sudah di-decrement di finally)
+        await Account.findByIdAndUpdate(
+            account._id,
+            { $inc: { inviteCount: 1 }, $set: { lastUsed: new Date() } }
+        );
+        const newInviteCount = account.inviteCount + 1;
+        if (newInviteCount >= account.maxInvites) {
+            await Account.findByIdAndUpdate(account._id, { status: 'full' });
+            await notifyAccountStatusChange(account.email, 'active', 'full').catch(() => {});
+            // Akun full → lepas VPN namespace
+            try { await releaseAccount(account._id); } catch (_) {}
         }
-        await account.save();
 
         // Set guarantee date
         const guaranteeDays = getTierGuaranteeDays(tier || 'basic');
@@ -227,10 +258,8 @@ async function processJob(job) {
         job.accountId = account._id.toString();
         await job.save();
 
-        // Notify admin channel
         await notifyInviteSuccess(targetEmail, account.email);
 
-        // Notify Telegram user via bot
         if (!isWeb) {
             try {
                 const { bot } = require('../bot/userHandlers');

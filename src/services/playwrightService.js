@@ -74,9 +74,11 @@ async function sendScreenshotToAdmin(page, label) {
 }
 
 /**
- * Launch a fresh browser instance (each invite gets its own browser)
+ * Launch a fresh browser instance (each invite gets its own browser).
+ * @param {string|null} proxy  - proxy string, or null for direct
+ * @param {string|null} nsName - linux netns name (e.g. "ns_vpn_0"), or null to skip VPN
  */
-async function launchBrowser(proxy) {
+async function launchBrowser(proxy, nsName = null) {
     const launchOptions = {
         headless: true,
         args: [
@@ -88,6 +90,23 @@ async function launchBrowser(proxy) {
             '--no-zygote',
         ],
     };
+
+    // Kalau ada VPN namespace, gunakan wrapper script sebagai executablePath
+    // agar proses Chromium jalan di dalam network namespace tersebut.
+    if (nsName) {
+        try {
+            const { getWrapperPath } = require('./vpnService');
+            const wrapperPath = getWrapperPath(nsName);
+            if (wrapperPath) {
+                launchOptions.executablePath = wrapperPath;
+                console.log(`[Playwright] VPN namespace: ${nsName} (wrapper: ${wrapperPath})`);
+            } else {
+                console.warn(`[Playwright] Wrapper script untuk ${nsName} tidak ditemukan, fallback ke Chromium biasa`);
+            }
+        } catch (err) {
+            console.warn('[Playwright] vpnService error saat load wrapper, fallback:', err.message);
+        }
+    }
 
     if (proxy) {
         launchOptions.proxy = parseProxy(proxy);
@@ -238,21 +257,24 @@ async function loginAccount(account) {
 }
 
 /**
- * Invite a team member to ChatGPT Team workspace
+ * Invite a team member to ChatGPT Team workspace.
  * Each call gets its own browser + proxy from the pool.
+ * @param {object} account    - Account document
+ * @param {string} targetEmail
+ * @param {string|null} nsName - VPN network namespace name, atau null untuk proxy biasa
  */
-async function inviteTeamMember(account, targetEmail) {
+async function inviteTeamMember(account, targetEmail, nsName = null) {
     // Use per-account proxy first, fallback to proxy pool
     const proxy = account.assignedProxy || getNextProxy();
-    return await inviteWithSession(account, targetEmail, proxy);
+    return await inviteWithSession(account, targetEmail, proxy, nsName);
 }
 
 /**
  * Internal: perform invite with current session
  */
-async function inviteWithSession(account, targetEmail, proxy) {
-    if (!proxy && arguments.length < 3) proxy = account.assignedProxy || getNextProxy();
-    const browser = await launchBrowser(proxy);
+async function inviteWithSession(account, targetEmail, proxy, nsName = null) {
+    if (!proxy) proxy = account.assignedProxy || getNextProxy();
+    const browser = await launchBrowser(proxy, nsName);
 
     let context;
     if (account.sessionData) {
@@ -302,7 +324,7 @@ async function inviteWithSession(account, targetEmail, proxy) {
                     console.log(`[Playwright][${targetEmail}] Re-login successful, retrying invite...`);
 
                     // Retry invite with new session (non-recursive, inline)
-                    return await inviteWithSession(account, targetEmail);
+                    return await inviteWithSession(account, targetEmail, proxy, nsName);
                 } else {
                     // Mark account as error
                     await Account.findByIdAndUpdate(account._id, { status: 'error' });
