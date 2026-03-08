@@ -125,7 +125,20 @@ async function waitForTun(nsName, timeoutMs = 30000) {
 }
 
 /**
- * Buat namespace baru, jalankan openVPN di dalamnya, tulis wrapper script.
+ * Dapatkan nama interface default host (eth0, ens3, dst)
+ */
+function getDefaultIface() {
+    try {
+        const out = execSync("ip route show default | awk '{print $5}' | head -1", { encoding: 'utf8' }).trim();
+        return out || 'eth0';
+    } catch {
+        return 'eth0';
+    }
+}
+
+/**
+ * Buat namespace baru dengan akses internet via veth pair + NAT,
+ * jalankan openVPN di dalamnya, tulis wrapper script.
  */
 async function createNamespace(nsIndex) {
     const nsName = `ns_vpn_${nsIndex}`;
@@ -135,13 +148,44 @@ async function createNamespace(nsIndex) {
         throw new Error(`[VPN] Config tidak ditemukan: ${ovpnConfig}`);
     }
 
+    // IP untuk veth pair — tiap namespace pakai subnet /30 sendiri
+    // ns_vpn_0: 10.200.0.1 (host) <-> 10.200.0.2 (ns)
+    // ns_vpn_1: 10.200.1.1 (host) <-> 10.200.1.2 (ns)
+    const hostVethIp = `10.200.${nsIndex}.1`;
+    const nsVethIp   = `10.200.${nsIndex}.2`;
+    const vethHost   = `veth_h${nsIndex}`; // max 15 char
+    const vethNs     = `veth_n${nsIndex}`;
+    const defaultIface = getDefaultIface();
+
     // Buat netns
     if (!nsExists(nsName)) {
         execSync(`ip netns add ${nsName}`);
-        // Aktifkan loopback di dalam namespace
         execSync(`ip netns exec ${nsName} ip link set lo up`);
         console.log(`[VPN] Namespace ${nsName} dibuat`);
     }
+
+    // Setup veth pair: host <-> namespace
+    // Hapus dulu kalau ada sisa dari run sebelumnya
+    try { execSync(`ip link del ${vethHost}`, { stdio: 'ignore' }); } catch { /* ok */ }
+    execSync(`ip link add ${vethHost} type veth peer name ${vethNs}`);
+    execSync(`ip link set ${vethNs} netns ${nsName}`);
+    execSync(`ip addr add ${hostVethIp}/30 dev ${vethHost}`);
+    execSync(`ip link set ${vethHost} up`);
+    execSync(`ip netns exec ${nsName} ip addr add ${nsVethIp}/30 dev ${vethNs}`);
+    execSync(`ip netns exec ${nsName} ip link set ${vethNs} up`);
+    execSync(`ip netns exec ${nsName} ip route add default via ${hostVethIp}`);
+    console.log(`[VPN] veth pair: ${vethHost}(${hostVethIp}) <-> ${vethNs}(${nsVethIp})`);
+
+    // DNS untuk namespace via /etc/netns/<nsName>/resolv.conf
+    execSync(`mkdir -p /etc/netns/${nsName}`);
+    fs.writeFileSync(`/etc/netns/${nsName}/resolv.conf`, 'nameserver 8.8.8.8\nnameserver 8.8.4.4\n');
+
+    // Aktifkan IP forwarding dan NAT di host
+    execSync(`sysctl -w net.ipv4.ip_forward=1`, { stdio: 'ignore' });
+    // Hapus rule lama dulu (idempotent), lalu tambah
+    try { execSync(`iptables -t nat -D POSTROUTING -s ${nsVethIp}/32 -o ${defaultIface} -j MASQUERADE`, { stdio: 'ignore' }); } catch { /* ok */ }
+    execSync(`iptables -t nat -A POSTROUTING -s ${nsVethIp}/32 -o ${defaultIface} -j MASQUERADE`);
+    console.log(`[VPN] NAT aktif: ${nsVethIp} -> ${defaultIface}`);
 
     // Spawn openvpn di dalam namespace
     console.log(`[VPN] Menghubungkan ${nsName} via ${path.basename(ovpnConfig)}...`);
@@ -158,8 +202,11 @@ async function createNamespace(nsIndex) {
     // Tunggu tun0 up
     const connected = await waitForTun(nsName);
     if (!connected) {
-        // Cleanup namespace kalau gagal connect
-        try { execSync(`ip netns del ${nsName}`); } catch { /* ignore */ }
+        // Cleanup
+        try { execSync(`iptables -t nat -D POSTROUTING -s ${nsVethIp}/32 -o ${defaultIface} -j MASQUERADE`, { stdio: 'ignore' }); } catch { /* ok */ }
+        try { execSync(`ip link del ${vethHost}`, { stdio: 'ignore' }); } catch { /* ok */ }
+        try { execSync(`ip netns del ${nsName}`); } catch { /* ok */ }
+        try { execSync(`rm -rf /etc/netns/${nsName}`); } catch { /* ok */ }
         throw new Error(`[VPN] ${nsName} gagal connect dalam 30 detik. Cek /tmp/vpn_${nsName}.log`);
     }
     console.log(`[VPN] ${nsName} terhubung ✓`);
@@ -169,7 +216,6 @@ async function createNamespace(nsIndex) {
     try {
         chromiumPath = require('playwright').chromium.executablePath();
     } catch {
-        // Fallback ke chromium sistem
         chromiumPath = execSync('which chromium-browser || which chromium || which google-chrome', { encoding: 'utf8' }).trim();
     }
 
@@ -179,12 +225,14 @@ async function createNamespace(nsIndex) {
     fs.writeFileSync(wrapperPath, wrapperContent, { mode: 0o755 });
     console.log(`[VPN] Wrapper script: ${wrapperPath}`);
 
-    // Simpan ke map (pid akan null karena --daemon, track via nsName saja)
     vpnNamespaces.set(nsName, {
         ovpnConfig,
         accountIds: [],
         pid: ovpnProc.pid || null,
         wrapperPath,
+        vethHost,
+        nsVethIp,
+        defaultIface,
     });
 
     return nsName;
@@ -281,16 +329,20 @@ async function releaseAccount(accountId) {
         if (ns.accountIds.length === 0) {
             console.log(`[VPN] ${nsName} kosong, melakukan cleanup...`);
             try {
-                // Kill semua proses openvpn di dalam namespace
                 try { execSync(`ip netns exec ${nsName} pkill openvpn`, { stdio: 'ignore' }); } catch { /* ok */ }
                 await new Promise(r => setTimeout(r, 2000));
+                // Hapus iptables NAT rule
+                try { execSync(`iptables -t nat -D POSTROUTING -s ${ns.nsVethIp}/32 -o ${ns.defaultIface} -j MASQUERADE`, { stdio: 'ignore' }); } catch { /* ok */ }
+                // Hapus veth pair (otomatis hapus pasangannya juga)
+                try { execSync(`ip link del ${ns.vethHost}`, { stdio: 'ignore' }); } catch { /* ok */ }
                 // Hapus namespace
                 execSync(`ip netns del ${nsName}`);
+                // Hapus DNS config
+                try { execSync(`rm -rf /etc/netns/${nsName}`); } catch { /* ok */ }
                 console.log(`[VPN] Namespace ${nsName} dihapus ✓`);
             } catch (err) {
                 console.warn(`[VPN] Gagal cleanup ${nsName}:`, err.message);
             }
-            // Hapus wrapper script
             try { fs.unlinkSync(ns.wrapperPath); } catch { /* ok */ }
             vpnNamespaces.delete(nsName);
         }
