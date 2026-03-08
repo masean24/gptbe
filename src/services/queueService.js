@@ -97,7 +97,7 @@ async function processQueue() {
                     job.status = 'failed';
                     job.result = `Internal error: ${err.message}`;
                     await job.save();
-                    await notifyInviteFailed(job.targetEmail, err.message);
+                    await notifyInviteFailed(job.targetEmail);
                     await notifyUser(job.telegramId, job.targetEmail, err.message);
                     await refundWebRedeem(job.telegramId);
                 } finally {
@@ -138,7 +138,7 @@ async function processJob(job) {
             job.status = 'failed';
             job.result = 'credits_insufficient';
             await job.save();
-            await notifyInviteFailed(targetEmail, 'Kredit tidak cukup');
+            await notifyInviteFailed(targetEmail);
             await notifyUser(telegramId, targetEmail, 'Kredit tidak cukup');
             return;
         }
@@ -150,7 +150,7 @@ async function processJob(job) {
         job.status = 'failed';
         job.result = 'no_account_available';
         await job.save();
-        await notifyInviteFailed(targetEmail, 'Tidak ada akun tersedia');
+        await notifyInviteFailed(targetEmail);
         await notifyUser(telegramId, targetEmail, 'Tidak ada akun tersedia saat ini. Coba lagi nanti.');
         return;
     }
@@ -188,7 +188,7 @@ async function processJob(job) {
                 job.status = 'failed';
                 job.result = 'credits_insufficient';
                 await job.save();
-                await notifyInviteFailed(targetEmail, 'Kredit habis saat proses');
+                await notifyInviteFailed(targetEmail);
                 await notifyUser(telegramId, targetEmail, 'Kredit habis saat proses invite');
                 return;
             }
@@ -247,7 +247,7 @@ async function processJob(job) {
         job.status = 'failed';
         job.result = result.message;
         await job.save();
-        await notifyInviteFailed(targetEmail, result.message);
+        await notifyInviteFailed(targetEmail);
         await notifyUser(telegramId, targetEmail, result.message);
         await refundWebRedeem(telegramId);
     }

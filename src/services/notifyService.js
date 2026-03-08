@@ -78,12 +78,10 @@ async function notifyInviteSuccess(email, accountEmail) {
     );
 }
 
-async function notifyInviteFailed(email, reason) {
-    const safeReason = escapeMarkdown(reason);
+async function notifyInviteFailed(email) {
     await notify(
         `❌ *INVITE GAGAL*\n${SEP}\n` +
         `📧 \`${maskEmail(email)}\`\n` +
-        `💬 ${safeReason}\n` +
         `🕐 _${nowWIB()} WIB_`
     );
 }

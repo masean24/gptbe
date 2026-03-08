@@ -47,16 +47,14 @@ async function showAdminMenu(ctx) {
 
     const freeCreditBot = await Settings.getValue('free_credit_bot', true);
     const freeCreditWeb = await Settings.getValue('free_credit_web', true);
-
     const keyboard = new InlineKeyboard()
-        .text('👥 List Users', 'adm_listusers').row()
-        .text('🏦 Akun ChatGPT', 'adm_listaccounts').row()
-        .text('🎫 Generate Kode', 'adm_gencode').row()
-        .text('💎 Beri Kredit', 'adm_addcredit').row()
-        .text('📢 Broadcast', 'adm_broadcast').row()
-        .text('📊 Statistik', 'adm_stats').row()
-        .text(`🤖 Free Credit Bot: ${freeCreditBot ? '✅ ON' : '❌ OFF'}`, 'toggle_free_credit_bot').row()
-        .text(`🌐 Free Credit Web: ${freeCreditWeb ? '✅ ON' : '❌ OFF'}`, 'toggle_free_credit_web');
+        .text('👥 List Users', 'adm_listusers').text('🏦 Akun ChatGPT', 'adm_listaccounts').row()
+        .text('🎟️ Generate Kode', 'adm_gencode').text('💎 Beri Kredit', 'adm_addcredit').row()
+        .text('📢 Broadcast', 'adm_broadcast').text('📊 Statistik', 'adm_stats').row()
+        .text('🔐 Login Akun', 'adm_loginaccount').text('🌐 Set Proxy', 'adm_setproxy').row()
+        .text('🚫 Block User', 'adm_blockuser').text('✅ Unblock User', 'adm_unblockuser').row()
+        .text(`🤖 Free Bot: ${freeCreditBot ? '✅' : '❌'}`, 'toggle_free_credit_bot')
+        .text(`🌐 Free Web: ${freeCreditWeb ? '✅' : '❌'}`, 'toggle_free_credit_web');
 
     // Add web admin panel button if FRONTEND_URL is set
     const frontendUrl = process.env.FRONTEND_URL || '';
@@ -433,6 +431,70 @@ function registerAdminHandlers(bot) {
         } else {
             await ctx.reply(`✅ Proxy untuk \`${accountEmail}\` dihapus. Akan pakai proxy pool / direct.`, { parse_mode: 'Markdown' });
         }
+    }));
+
+    // ---- LOGIN ACCOUNT (button) ----
+    bot.callbackQuery('adm_loginaccount', adminOnly(async (ctx) => {
+        await ctx.answerCallbackQuery();
+        const accounts = await Account.find().sort({ createdAt: -1 });
+        if (!accounts.length) {
+            return ctx.editMessageText('📭 Belum ada akun.', { reply_markup: new InlineKeyboard().text('⬅️ Kembali', 'adm_back') });
+        }
+        const keyboard = new InlineKeyboard();
+        accounts.forEach(acc => {
+            const icon = acc.hasSession ? '✅' : '❌';
+            keyboard.text(`${icon} ${acc.email}`, `adm_dologin_${acc._id}`).row();
+        });
+        keyboard.text('⬅️ Kembali', 'adm_back');
+        await ctx.editMessageText('🔐 *LOGIN AKUN*\n\nPilih akun untuk login:', { parse_mode: 'Markdown', reply_markup: keyboard });
+    }));
+
+    bot.callbackQuery(/^adm_dologin_(.+)$/, adminOnly(async (ctx) => {
+        const accountId = ctx.match[1];
+        await ctx.answerCallbackQuery();
+        const account = await Account.findById(accountId);
+        if (!account) return ctx.editMessageText('❌ Akun tidak ditemukan.', { reply_markup: new InlineKeyboard().text('⬅️ Kembali', 'adm_back') });
+
+        await ctx.editMessageText(`⏳ Login ke \`${account.email}\`... (bisa 1-2 menit)`, { parse_mode: 'Markdown' });
+        const result = await loginAccount(account);
+        if (result.success) {
+            account.sessionData = result.sessionData;
+            account.hasSession = true;
+            account.status = 'active';
+            await account.save();
+            await ctx.editMessageText(`✅ Login berhasil! \`${account.email}\` siap dipakai.`, { parse_mode: 'Markdown', reply_markup: new InlineKeyboard().text('⬅️ Kembali', 'adm_back') });
+        } else {
+            await ctx.editMessageText(`❌ Login gagal: ${result.message}`, { reply_markup: new InlineKeyboard().text('🔄 Coba Lagi', `adm_dologin_${accountId}`).row().text('⬅️ Kembali', 'adm_back') });
+        }
+    }));
+
+    // ---- SET PROXY (button) ----
+    bot.callbackQuery('adm_setproxy', adminOnly(async (ctx) => {
+        await ctx.answerCallbackQuery();
+        const accounts = await Account.find().sort({ createdAt: -1 });
+        let text = '🌐 *SET PROXY PER AKUN*\n\n';
+        accounts.forEach(acc => {
+            text += `• \`${acc.email}\`\n  Proxy: ${acc.assignedProxy || '_(tidak ada — pakai pool/direct)_'}\n\n`;
+        });
+        text += `Format:\n\`/setproxy email@akun.com http://proxy:port\`\n\`/setproxy email@akun.com\` _(hapus proxy)_`;
+        await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: new InlineKeyboard().text('⬅️ Kembali', 'adm_back') });
+    }));
+
+    // ---- BLOCK/UNBLOCK USER (button) ----
+    bot.callbackQuery('adm_blockuser', adminOnly(async (ctx) => {
+        await ctx.answerCallbackQuery();
+        await ctx.editMessageText(
+            '🚫 *BLOCK USER*\n\nFormat:\n`/blockuser <telegram_id>`',
+            { parse_mode: 'Markdown', reply_markup: new InlineKeyboard().text('⬅️ Kembali', 'adm_back') }
+        );
+    }));
+
+    bot.callbackQuery('adm_unblockuser', adminOnly(async (ctx) => {
+        await ctx.answerCallbackQuery();
+        await ctx.editMessageText(
+            '✅ *UNBLOCK USER*\n\nFormat:\n`/unblockuser <telegram_id>`',
+            { parse_mode: 'Markdown', reply_markup: new InlineKeyboard().text('⬅️ Kembali', 'adm_back') }
+        );
     }));
 
     // ---- BLOCK USER ----

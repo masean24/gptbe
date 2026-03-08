@@ -3,7 +3,6 @@ const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const speakeasy = require('speakeasy');
 const fs = require('fs');
 const Account = require('../models/Account');
-const { notifySessionExpired } = require('./notifyService');
 
 chromium.use(StealthPlugin());
 
@@ -152,7 +151,6 @@ async function loginAccount(account) {
         console.log(`[Login][${account.email}] Step 1: Navigating to chatgpt.com...`);
         await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
         await randomDelay(5000, 8000);
-        await sendScreenshotToAdmin(page, `login_1_loaded_${account.email.split('@')[0]}`);
 
         console.log(`[Login][${account.email}] Step 1: URL after load: ${page.url()}`);
         console.log(`[Login][${account.email}] Step 1: Clicking Log in button...`);
@@ -172,7 +170,6 @@ async function loginAccount(account) {
         // Jika ada, klik "Continue with password" dulu
         const urlAfterEmail = page.url();
         console.log(`[Login][${account.email}] Step 3: URL after email: ${urlAfterEmail}`);
-        await sendScreenshotToAdmin(page, `login_3_after_email_${account.email.split('@')[0]}`);
         if (urlAfterEmail.includes('email-verification')) {
             console.log(`[Login][${account.email}] Step 3: Email verification page detected, clicking Continue with password...`);
             await page.click('button:has-text("Continue with password")');
@@ -302,19 +299,16 @@ async function inviteWithSession(account, targetEmail, proxy) {
                         hasSession: true,
                     });
                     account.sessionData = loginResult.sessionData;
-                    await notifySessionExpired(account.email, true);
                     console.log(`[Playwright][${targetEmail}] Re-login successful, retrying invite...`);
 
                     // Retry invite with new session (non-recursive, inline)
                     return await inviteWithSession(account, targetEmail);
                 } else {
-                    await notifySessionExpired(account.email, false);
                     // Mark account as error
                     await Account.findByIdAndUpdate(account._id, { status: 'error' });
                     return { success: false, message: `Session expired. Re-login gagal: ${loginResult.message}` };
                 }
             } catch (reloginErr) {
-                await notifySessionExpired(account.email, false);
                 await Account.findByIdAndUpdate(account._id, { status: 'error' });
                 return { success: false, message: `Session expired. Re-login error: ${reloginErr.message}` };
             }
