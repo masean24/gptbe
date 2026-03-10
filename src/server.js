@@ -353,6 +353,33 @@ app.post('/api/web/user/invite', authMiddleware, webUserMiddleware, async (req, 
 });
 
 // =========================================================
+// Web User: Job status (poll invite result)
+// =========================================================
+app.get('/api/web/job/:jobId', authMiddleware, webUserMiddleware, async (req, res) => {
+    try {
+        const user = await WebUser.findById(req.user.webUserId);
+        if (!user) return res.status(404).json({ error: 'User tidak ditemukan' });
+
+        const job = await InviteJob.findById(req.params.jobId);
+        if (!job) return res.status(404).json({ error: 'Job tidak ditemukan' });
+
+        // Only allow viewing own jobs
+        if (job.telegramId !== `webuser_${user._id}`) return res.status(403).json({ error: 'Forbidden' });
+
+        res.json({
+            status: job.status,
+            result: job.result || null,
+            targetEmail: job.targetEmail,
+            tier: job.tier,
+            createdAt: job.createdAt,
+        });
+    } catch (err) {
+        console.error('[Job Status] Error:', err.message);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// =========================================================
 // Web User: Create QRIS payment (tier-based pricing)
 // =========================================================
 app.post('/api/web/user/pay', authMiddleware, webUserMiddleware, async (req, res) => {

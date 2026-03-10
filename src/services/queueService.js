@@ -250,7 +250,7 @@ async function processJob(job) {
             credits: -1,
             invitedEmail: targetEmail,
             tier: tier || 'basic',
-            description: `Invite ${targetEmail} via akun ${account.email} [${tierLabel[tier] || 'Basic'}]`,
+            description: `Invite ${targetEmail} [${tierLabel[tier] || 'Basic'}]`,
         });
 
         job.status = 'done';

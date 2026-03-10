@@ -185,7 +185,13 @@ async function createNamespace(nsIndex) {
     // Hapus rule lama dulu (idempotent), lalu tambah
     try { execSync(`iptables -t nat -D POSTROUTING -s ${nsVethIp}/32 -o ${defaultIface} -j MASQUERADE`, { stdio: 'ignore' }); } catch { /* ok */ }
     execSync(`iptables -t nat -A POSTROUTING -s ${nsVethIp}/32 -o ${defaultIface} -j MASQUERADE`);
-    console.log(`[VPN] NAT aktif: ${nsVethIp} -> ${defaultIface}`);
+
+    // FORWARD rules — tanpa ini traffic dari namespace TIDAK bisa keluar
+    try { execSync(`iptables -D FORWARD -i ${vethHost} -o ${defaultIface} -j ACCEPT`, { stdio: 'ignore' }); } catch { /* ok */ }
+    try { execSync(`iptables -D FORWARD -i ${defaultIface} -o ${vethHost} -m state --state RELATED,ESTABLISHED -j ACCEPT`, { stdio: 'ignore' }); } catch { /* ok */ }
+    execSync(`iptables -A FORWARD -i ${vethHost} -o ${defaultIface} -j ACCEPT`);
+    execSync(`iptables -A FORWARD -i ${defaultIface} -o ${vethHost} -m state --state RELATED,ESTABLISHED -j ACCEPT`);
+    console.log(`[VPN] NAT + FORWARD aktif: ${nsVethIp} -> ${defaultIface}`);
 
     // Pre-resolve hostname VPN di HOST agar openvpn tidak perlu DNS di dalam namespace
     // (namespace baru isolasi network-nya terpisah, DNS mungkin belum reliable saat pertama konek)
@@ -229,8 +235,10 @@ async function createNamespace(nsIndex) {
     // Tunggu tun0 up (max 60 detik)
     const connected = await waitForTun(nsName, 60000);
     if (!connected) {
-        // Cleanup
+        // Cleanup — termasuk FORWARD rules
         try { execSync(`iptables -t nat -D POSTROUTING -s ${nsVethIp}/32 -o ${defaultIface} -j MASQUERADE`, { stdio: 'ignore' }); } catch { /* ok */ }
+        try { execSync(`iptables -D FORWARD -i ${vethHost} -o ${defaultIface} -j ACCEPT`, { stdio: 'ignore' }); } catch { /* ok */ }
+        try { execSync(`iptables -D FORWARD -i ${defaultIface} -o ${vethHost} -m state --state RELATED,ESTABLISHED -j ACCEPT`, { stdio: 'ignore' }); } catch { /* ok */ }
         try { execSync(`ip link del ${vethHost}`, { stdio: 'ignore' }); } catch { /* ok */ }
         try { execSync(`ip netns del ${nsName}`); } catch { /* ok */ }
         try { execSync(`rm -rf /etc/netns/${nsName}`); } catch { /* ok */ }
@@ -358,8 +366,10 @@ async function releaseAccount(accountId) {
             try {
                 try { execSync(`ip netns exec ${nsName} pkill openvpn`, { stdio: 'ignore' }); } catch { /* ok */ }
                 await new Promise(r => setTimeout(r, 2000));
-                // Hapus iptables NAT rule
+                // Hapus iptables NAT + FORWARD rules
                 try { execSync(`iptables -t nat -D POSTROUTING -s ${ns.nsVethIp}/32 -o ${ns.defaultIface} -j MASQUERADE`, { stdio: 'ignore' }); } catch { /* ok */ }
+                try { execSync(`iptables -D FORWARD -i ${ns.vethHost} -o ${ns.defaultIface} -j ACCEPT`, { stdio: 'ignore' }); } catch { /* ok */ }
+                try { execSync(`iptables -D FORWARD -i ${ns.defaultIface} -o ${ns.vethHost} -m state --state RELATED,ESTABLISHED -j ACCEPT`, { stdio: 'ignore' }); } catch { /* ok */ }
                 // Hapus veth pair (otomatis hapus pasangannya juga)
                 try { execSync(`ip link del ${ns.vethHost}`, { stdio: 'ignore' }); } catch { /* ok */ }
                 // Hapus namespace
