@@ -221,7 +221,29 @@ async function checkAccount(account) {
             members.push({ email: m.email, status: 'pending', joinedAt: m.dateInvited || null });
         }
 
-        // ============ Step 4: Update DB ============
+        // ============ Step 4: Cross-reference with InviteJob DB ============
+        console.log(`[Checker][${account.email}] Step 4: Cross-referencing with InviteJob database...`);
+
+        // Get all emails that were legitimately invited by the bot for this account
+        const botInviteJobs = await InviteJob.find({
+            accountId: account._id.toString(),
+            status: 'done',
+        }).select('targetEmail').lean();
+
+        const botInvitedEmails = new Set(botInviteJobs.map(j => j.targetEmail.toLowerCase()));
+        console.log(`[Checker][${account.email}] Bot-invited emails in DB: ${botInvitedEmails.size}`);
+
+        // Tag each member with source
+        for (const m of members) {
+            m.source = botInvitedEmails.has(m.email.toLowerCase()) ? 'bot' : 'unknown';
+        }
+
+        const unknownMembers = members.filter(m => m.source === 'unknown');
+        if (unknownMembers.length > 0) {
+            console.warn(`[Checker][${account.email}] ⚠️  ${unknownMembers.length} UNKNOWN member(s) detected: ${unknownMembers.map(m => m.email).join(', ')}`);
+        }
+
+        // ============ Step 5: Update DB ============
         const totalInviteCount = members.length; // active + pending both consume slots
 
         await Account.findByIdAndUpdate(account._id, {
@@ -231,7 +253,7 @@ async function checkAccount(account) {
             inviteCount: totalInviteCount,
         });
 
-        console.log(`[Checker][${account.email}] Done. Active: ${activeMembers.length}, Pending: ${pendingMembers.length}, Total slots used: ${totalInviteCount}`);
+        console.log(`[Checker][${account.email}] Done. Active: ${activeMembers.length}, Pending: ${pendingMembers.length}, Unknown: ${unknownMembers.length}, Total slots used: ${totalInviteCount}`);
 
         await browser.close();
         return {
@@ -240,6 +262,7 @@ async function checkAccount(account) {
             members,
             activeCount: activeMembers.length,
             pendingCount: pendingMembers.length,
+            unknownCount: unknownMembers.length,
         };
 
     } catch (error) {

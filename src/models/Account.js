@@ -23,6 +23,7 @@ const accountSchema = new mongoose.Schema({
         email: { type: String },
         status: { type: String, enum: ['active', 'pending'] },
         joinedAt: { type: String, default: null },
+        source: { type: String, enum: ['bot', 'unknown'], default: 'unknown' },
     }],
 });
 
