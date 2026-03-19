@@ -16,6 +16,14 @@ const accountSchema = new mongoose.Schema({
     reservedSlots: { type: Number, default: 0 },  // slots reserved by in-flight jobs (atomic, decremented in finally)
     vpnNamespace: { type: String, default: null }, // linux netns name, e.g. "ns_vpn_0"
     vpnAssignedAt: { type: Date, default: null },
+    // Checker fields
+    lastCheckedAt: { type: Date, default: null },
+    workspaceStatus: { type: String, enum: ['active', 'suspended', 'error', 'unknown'], default: 'unknown' },
+    invitedMembers: [{
+        email: { type: String },
+        status: { type: String, enum: ['active', 'pending'] },
+        joinedAt: { type: String, default: null },
+    }],
 });
 
 accountSchema.index({ status: 1, inviteCount: 1 });

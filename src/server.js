@@ -18,6 +18,7 @@ const { handleWebhookPayload, verifyWebhookSecret, createPayment, CREDIT_PRICE, 
 const { enqueue } = require('./services/queueService');
 const { notifyRedeemUsed, notifyPaymentReceived, notifyNewWebOrder, notifyNewWebRegistration, notifyGuaranteeClaim, notifyAdminCredit } = require('./services/notifyService');
 const { sendRedeemCode } = require('./services/emailService');
+const { checkAccount } = require('./services/checkerService');
 
 const app = express();
 
@@ -884,6 +885,60 @@ app.post('/api/admin/settings', authMiddleware, adminMiddleware, async (req, res
         res.json({ success: true, key, value });
     } catch (err) {
         res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// =========================================================
+// Admin: Account Checker
+// =========================================================
+app.get('/api/admin/accounts/checker', authMiddleware, adminMiddleware, async (req, res) => {
+    try {
+        const accounts = await Account.find()
+            .select('email status workspaceStatus inviteCount maxInvites invitedMembers lastCheckedAt hasSession')
+            .sort({ createdAt: 1 })
+            .lean();
+
+        const result = accounts.map(a => ({
+            ...a,
+            remainingSlots: Math.max(0, (a.maxInvites || 0) - (a.inviteCount || 0)),
+        }));
+
+        res.json(result);
+    } catch (err) {
+        console.error('[Admin Checker] Error:', err.message);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+app.post('/api/admin/accounts/:id/check', authMiddleware, adminMiddleware, async (req, res) => {
+    try {
+        const account = await Account.findById(req.params.id);
+        if (!account) return res.status(404).json({ error: 'Akun tidak ditemukan' });
+
+        // Check for active invite job
+        const activeJob = await InviteJob.findOne({
+            accountId: account._id.toString(),
+            status: 'processing',
+        });
+        if (activeJob) {
+            return res.status(409).json({ error: 'Akun sedang digunakan untuk invite, coba lagi nanti' });
+        }
+
+        const result = await checkAccount(account);
+
+        // Re-fetch updated account
+        const updated = await Account.findById(req.params.id)
+            .select('email status workspaceStatus inviteCount maxInvites invitedMembers lastCheckedAt hasSession')
+            .lean();
+
+        res.json({
+            ...updated,
+            remainingSlots: Math.max(0, (updated.maxInvites || 0) - (updated.inviteCount || 0)),
+            checkerResult: result,
+        });
+    } catch (err) {
+        console.error('[Admin Checker] Manual check error:', err.message);
+        res.status(500).json({ error: 'Checker gagal: ' + err.message });
     }
 });
 

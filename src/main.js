@@ -38,6 +38,10 @@ async function main() {
     const { processQueue } = require('./services/queueService');
     processQueue();
 
+    // Start account checker cron (every 6 hours)
+    const { startCheckerCron } = require('./services/checkerService');
+    startCheckerCron();
+
     // Graceful shutdown
     const shutdown = async (signal) => {
         console.log(`\n🛑 ${signal} received. Shutting down gracefully...`);
