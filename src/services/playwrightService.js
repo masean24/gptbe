@@ -484,4 +484,4 @@ async function inviteWithSession(account, targetEmail, proxy, nsName = null) {
     }
 }
 
-module.exports = { loginAccount, inviteTeamMember, parseProxy };
+module.exports = { loginAccount, inviteTeamMember, parseProxy, launchBrowser };
