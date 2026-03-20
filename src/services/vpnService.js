@@ -256,7 +256,7 @@ async function createNamespace(nsIndex) {
 
     // Tulis wrapper script agar Playwright launch di dalam namespace ini
     const wrapperPath = `/tmp/ns-chromium-${nsName}.sh`;
-    const wrapperContent = `#!/bin/bash\nexec /usr/bin/nsenter --net=/var/run/netns/${nsName} "${chromiumPath}" "$@"\n`;
+    const wrapperContent = `#!/bin/bash\nexec ip netns exec ${nsName} "${chromiumPath}" "$@"\n`;
     fs.writeFileSync(wrapperPath, wrapperContent, { mode: 0o755 });
     console.log(`[VPN] Wrapper script: ${wrapperPath}`);
 
