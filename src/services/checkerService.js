@@ -7,6 +7,38 @@ const { getOrCreateNamespace } = require('./vpnService');
 const { loginAccount, launchBrowser } = require('./playwrightService');
 
 /**
+ * Attempt re-login and retry check. Used by multiple detection cases.
+ */
+async function attemptReLogin(account, reason) {
+    console.log(`[Checker][${account.email}] ${reason} — attempting re-login...`);
+    try {
+        const loginResult = await loginAccount(account);
+        if (loginResult.success) {
+            await Account.findByIdAndUpdate(account._id, {
+                sessionData: loginResult.sessionData,
+                hasSession: true,
+            });
+            account.sessionData = loginResult.sessionData;
+            return await checkAccount(account);
+        } else {
+            await Account.findByIdAndUpdate(account._id, {
+                workspaceStatus: 'error',
+                lastCheckedAt: new Date(),
+                hasSession: false,
+            });
+            return { success: false, message: `${reason}, re-login failed: ${loginResult.message}` };
+        }
+    } catch (err) {
+        await Account.findByIdAndUpdate(account._id, {
+            workspaceStatus: 'error',
+            lastCheckedAt: new Date(),
+            hasSession: false,
+        });
+        return { success: false, message: `${reason}, re-login error: ${err.message}` };
+    }
+}
+
+/**
  * Check a single ChatGPT account:
  * - Navigate to /admin/members to scrape active members
  * - Navigate to /admin/members?tab=invites to scrape pending invites
@@ -84,43 +116,74 @@ async function checkAccount(account) {
         const currentUrl = page.url();
         console.log(`[Checker][${account.email}] URL: ${currentUrl}`);
 
-        // Check for session expired
-        const sessionExpiredModal = await page.locator('#modal-expired-session').count().catch(() => 0);
-        const isSessionExpired = currentUrl.includes('auth') || currentUrl.includes('login') || sessionExpiredModal > 0;
+        // Get page content for detection
+        const bodyText = (await page.textContent('body'))?.trim() || '';
+        const bodyLower = bodyText.toLowerCase();
+        const bodyLen = bodyText.length;
+        console.log(`[Checker][${account.email}] Body length: ${bodyLen} chars`);
 
-        if (isSessionExpired) {
-            console.log(`[Checker][${account.email}] Session expired, attempting re-login...`);
+        // ── Case 1: Blank white page (stale session, body almost empty) ──
+        if (bodyLen < 50) {
+            console.log(`[Checker][${account.email}] Blank page detected (${bodyLen} chars) — session stale`);
             await browser.close();
-
-            try {
-                const loginResult = await loginAccount(account);
-                if (loginResult.success) {
-                    await Account.findByIdAndUpdate(account._id, {
-                        sessionData: loginResult.sessionData,
-                        hasSession: true,
-                    });
-                    account.sessionData = loginResult.sessionData;
-                    // Retry check with new session
-                    return await checkAccount(account);
-                } else {
-                    await Account.findByIdAndUpdate(account._id, {
-                        workspaceStatus: 'error',
-                        lastCheckedAt: new Date(),
-                    });
-                    return { success: false, message: `Session expired, re-login failed: ${loginResult.message}` };
-                }
-            } catch (reloginErr) {
-                await Account.findByIdAndUpdate(account._id, {
-                    workspaceStatus: 'error',
-                    lastCheckedAt: new Date(),
-                });
-                return { success: false, message: `Session expired, re-login error: ${reloginErr.message}` };
-            }
+            await Account.findByIdAndUpdate(account._id, {
+                workspaceStatus: 'error',
+                lastCheckedAt: new Date(),
+                hasSession: false,
+            });
+            return { success: false, message: 'Session stale (blank page), perlu re-login' };
         }
 
-        // Check for suspended/banned
-        const bodyText = (await page.textContent('body'))?.toLowerCase() || '';
-        if (bodyText.includes('suspended') || bodyText.includes('banned') || bodyText.includes('deactivated')) {
+        // ── Case 2: "Oops, an error occurred! (account_deactivated)" → BANNED ──
+        if (bodyLower.includes('account_deactivated') || bodyLower.includes('oops, an error occurred')) {
+            console.log(`[Checker][${account.email}] ❌ Account DEACTIVATED/BANNED`);
+            await browser.close();
+            await Account.findByIdAndUpdate(account._id, {
+                workspaceStatus: 'suspended',
+                lastCheckedAt: new Date(),
+                hasSession: false,
+            });
+            return { success: true, workspaceStatus: 'suspended', members: [], message: 'Account deactivated/banned' };
+        }
+
+        // ── Case 3: ChatGPT homepage with "Log in" / "Sign up for free" → not logged in ──
+        if (bodyLower.includes('sign up for free') || bodyLower.includes('log in to get answers')) {
+            console.log(`[Checker][${account.email}] Not logged in (ChatGPT homepage detected)`);
+            await browser.close();
+
+            // Attempt re-login
+            return await attemptReLogin(account, 'Not logged in (homepage)');
+        }
+
+        // ── Case 4: "Your session has expired" popup ──
+        if (bodyLower.includes('session has expired') || bodyLower.includes('session expired')) {
+            console.log(`[Checker][${account.email}] Session expired popup detected`);
+            await browser.close();
+
+            return await attemptReLogin(account, 'Session expired popup');
+        }
+
+        // ── Case 4b: URL redirect to auth/login ──
+        if (currentUrl.includes('auth') || currentUrl.includes('login')) {
+            console.log(`[Checker][${account.email}] Redirected to login page: ${currentUrl}`);
+            await browser.close();
+
+            return await attemptReLogin(account, `Redirected to ${currentUrl}`);
+        }
+
+        // ── Case 5: Logged in ChatGPT but NOT on /admin/members → no admin access ──
+        if (!currentUrl.includes('/admin/members') && !currentUrl.includes('/admin')) {
+            console.log(`[Checker][${account.email}] ⚠️ Logged in but no admin access (URL: ${currentUrl})`);
+            await browser.close();
+            await Account.findByIdAndUpdate(account._id, {
+                workspaceStatus: 'error',
+                lastCheckedAt: new Date(),
+            });
+            return { success: false, message: `No admin access — redirected to ${currentUrl}` };
+        }
+
+        // ── Still check for legacy suspended/banned text ──
+        if (bodyLower.includes('suspended') || bodyLower.includes('banned')) {
             console.log(`[Checker][${account.email}] Account appears suspended/banned`);
             await browser.close();
             await Account.findByIdAndUpdate(account._id, {
