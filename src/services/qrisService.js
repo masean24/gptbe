@@ -2,6 +2,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 const Transaction = require('../models/Transaction');
 const User = require('../models/User');
+const WebUser = require('../models/WebUser');
 
 const QRIS_API_URL = process.env.QRIS_API_URL || 'https://qris.hubify.store/api';
 const QRIS_API_KEY = process.env.QRIS_API_KEY;
@@ -106,24 +107,45 @@ async function handleWebhookPayload(payload) {
     if (status !== 'completed') return { matched: false };
     if (!order_id) return { matched: false };
 
-    const txn = await Transaction.findOne({
-        qrisOrderId: order_id,
-        qrisStatus: 'pending',
-    });
+    const txn = await Transaction.findOneAndUpdate(
+        {
+            qrisOrderId: order_id,
+            qrisStatus: 'pending',
+        },
+        {
+            $set: {
+                qrisStatus: 'paid',
+            },
+        },
+        { new: true }
+    );
 
-    if (!txn) return { matched: false };
-    if (txn.qrisStatus === 'paid') return { matched: true, alreadyProcessed: true };
+    if (!txn) {
+        const existingTxn = await Transaction.findOne({ qrisOrderId: order_id });
+        if (existingTxn?.qrisStatus === 'paid') {
+            return { matched: true, alreadyProcessed: true };
+        }
+        return { matched: false };
+    }
 
     const telegramId = txn.telegramId;
     const tier = txn.tier || 'basic';
+    const isWebOrder = telegramId.startsWith('web_') || telegramId.startsWith('webuser_');
 
-    // Update transaction
-    txn.qrisStatus = 'paid';
-    await txn.save();
-
-    // Add tier-specific credits to user (skip for web orders)
+    // Add tier-specific credits to user
     let newBalance = 0;
-    if (!telegramId.startsWith('web_')) {
+    if (telegramId.startsWith('webuser_')) {
+        const webUserId = telegramId.replace('webuser_', '');
+        const creditField = `credits_${tier}`;
+        const webUser = await WebUser.findByIdAndUpdate(
+            webUserId,
+            { $inc: { [creditField]: txn.credits } },
+            { new: true }
+        );
+        if (webUser) {
+            newBalance = (webUser.credits_basic || 0) + (webUser.credits_standard || 0) + (webUser.credits_premium || 0);
+        }
+    } else if (!isWebOrder) {
         const creditField = `credits_${tier}`;
         const user = await User.findOneAndUpdate(
             { telegramId },

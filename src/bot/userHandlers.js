@@ -1,5 +1,6 @@
 require('dotenv').config();
 const { Bot, InlineKeyboard } = require('grammy');
+const mongoose = require('mongoose');
 const User = require('../models/User');
 const Account = require('../models/Account');
 const RedeemCode = require('../models/RedeemCode');
@@ -667,6 +668,85 @@ bot.command('redeem', async (ctx) => {
     const codeInput = args[1].trim().toUpperCase();
     const telegramId = String(ctx.from.id);
 
+    const session = await mongoose.startSession();
+    let redeemCodeDoc = null;
+    let updatedUser = null;
+
+    try {
+        await session.withTransaction(async () => {
+            redeemCodeDoc = await RedeemCode.findOneAndUpdate(
+                {
+                    code: codeInput,
+                    isUsed: false,
+                    $or: [
+                        { expiresAt: null },
+                        { expiresAt: { $gt: new Date() } },
+                    ],
+                },
+                {
+                    $set: {
+                        isUsed: true,
+                        usedBy: telegramId,
+                        usedAt: new Date(),
+                    },
+                },
+                { new: true, session }
+            );
+
+            if (!redeemCodeDoc) throw new Error('INVALID_OR_USED');
+
+            const redeemTier = redeemCodeDoc.tier || 'basic';
+            const creditField = `credits_${redeemTier}`;
+            updatedUser = await User.findOneAndUpdate(
+                { telegramId },
+                { $inc: { [creditField]: redeemCodeDoc.credits } },
+                { new: true, session }
+            );
+
+            if (!updatedUser) throw new Error('USER_NOT_FOUND');
+
+            const tierLabel = { basic: 'Basic', standard: 'Standard', premium: 'Premium' };
+            await Transaction.create([{
+                telegramId,
+                type: 'redeem',
+                credits: redeemCodeDoc.credits,
+                tier: redeemTier,
+                redeemCode: codeInput,
+                description: `Redeem code ${codeInput} (+${redeemCodeDoc.credits} kredit ${tierLabel[redeemTier]})`,
+            }], { session });
+        });
+    } catch (err) {
+        if (err.message === 'INVALID_OR_USED') {
+            return ctx.reply('âŒ *Kode tidak valid, sudah digunakan, atau kedaluwarsa!*', { parse_mode: 'Markdown' });
+        }
+        if (err.message === 'USER_NOT_FOUND') {
+            return ctx.reply('âŒ User tidak ditemukan. Coba /start dulu.', { parse_mode: 'Markdown' });
+        }
+        throw err;
+    } finally {
+        await session.endSession();
+    }
+
+    if (!redeemCodeDoc || !updatedUser) {
+        return ctx.reply('âŒ *Kode tidak valid, sudah digunakan, atau kedaluwarsa!*', { parse_mode: 'Markdown' });
+    }
+
+    const redeemTier = redeemCodeDoc.tier || 'basic';
+    const newTotalCredits = (updatedUser.credits_basic || 0) + (updatedUser.credits_standard || 0) + (updatedUser.credits_premium || 0);
+    const redeemTierLabel = { basic: 'Basic', standard: 'Standard', premium: 'Premium' };
+
+    const totalCredits = newTotalCredits;
+    const tierLabel = redeemTierLabel;
+
+    return ctx.reply(
+        `ðŸŽ‰ *Redeem Berhasil!*\n\n` +
+        `ðŸŽŸï¸ Kode: \`${codeInput}\`\n` +
+        `ðŸ’Ž +${redeemCodeDoc.credits} kredit ${tierLabel[redeemTier]} ditambahkan!\n\n` +
+        `ðŸ’° Saldo sekarang: *${totalCredits} kredit*\n\n` +
+        `Gunakan /invite email@example.com untuk mulai invite!`,
+        { parse_mode: 'Markdown', reply_markup: menuKeyboard }
+    );
+
     const code = await RedeemCode.findOne({ code: codeInput, isUsed: false });
     if (!code) {
         return ctx.reply('❌ *Kode tidak valid atau sudah digunakan!*', { parse_mode: 'Markdown' });
@@ -690,8 +770,8 @@ bot.command('redeem', async (ctx) => {
         { new: true }
     );
 
-    const totalCredits = (user.credits_basic || 0) + (user.credits_standard || 0) + (user.credits_premium || 0);
-    const tierLabel = { basic: 'Basic', standard: 'Standard', premium: 'Premium' };
+    const legacyTotalCredits = (user.credits_basic || 0) + (user.credits_standard || 0) + (user.credits_premium || 0);
+    const legacyTierLabel = { basic: 'Basic', standard: 'Standard', premium: 'Premium' };
 
     await Transaction.create({
         telegramId,

@@ -3,10 +3,12 @@ const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const speakeasy = require('speakeasy');
 const fs = require('fs');
 const Account = require('../models/Account');
+const { decryptSecret } = require('./secretService');
 
 chromium.use(StealthPlugin());
 
 const ADMIN_IDS = (process.env.ADMIN_IDS || '').split(',').map(id => id.trim()).filter(Boolean);
+const PLAYWRIGHT_LOG_CHAT_ID = (process.env.PLAYWRIGHT_LOG_CHAT_ID || '').trim();
 
 // ============ PROXY POOL ============
 const path = require('path');
@@ -51,25 +53,68 @@ function parseProxy(proxyStr) {
 }
 
 /**
- * Save screenshot and send to admin via Telegram
+ * Compatibility shim for older call sites.
  */
 async function sendScreenshotToAdmin(page, label) {
+    return sendScreenshotToLogChat(page, label);
+}
+/*
     const path = `/tmp/invite_${label}.png`;
+    let sent = false;
     try {
         await page.screenshot({ path, fullPage: true });
         console.log(`[Playwright] Screenshot saved: ${path}`);
-        if (ADMIN_IDS.length > 0) {
+        const targets = PLAYWRIGHT_LOG_CHAT_ID ? [PLAYWRIGHT_LOG_CHAT_ID] : ADMIN_IDS;
+        if (targets.length > 0) {
             const { bot } = require('../bot/userHandlers');
             const { InputFile } = require('grammy');
             const buffer = fs.readFileSync(path);
-            for (const adminId of ADMIN_IDS) {
-                await bot.api.sendPhoto(adminId, new InputFile(buffer, `${label}.png`), {
+            for (const chatId of targets) {
+                try {
+                    await bot.api.sendPhoto(chatId, new InputFile(buffer, `${label}.png`), {
                     caption: `🖥️ Playwright Debug: ${label}`,
                 }).catch(e => console.error('[Playwright] Failed to send screenshot:', e.message));
             }
         }
     } catch (err) {
         console.error(`[Playwright] Screenshot error:`, err.message);
+    }
+}
+
+*/
+async function sendScreenshotToLogChat(page, label) {
+    const path = `/tmp/invite_${label}.png`;
+    let sent = false;
+    try {
+        await page.screenshot({ path, fullPage: true });
+        console.log(`[Playwright] Screenshot saved: ${path}`);
+        const targets = PLAYWRIGHT_LOG_CHAT_ID ? [PLAYWRIGHT_LOG_CHAT_ID] : ADMIN_IDS;
+        if (targets.length > 0) {
+            const { bot } = require('../bot/userHandlers');
+            const { InputFile } = require('grammy');
+            const buffer = fs.readFileSync(path);
+            for (const chatId of targets) {
+                try {
+                    await bot.api.sendPhoto(chatId, new InputFile(buffer, `${label}.png`), {
+                        caption: `Playwright Debug: ${label}`,
+                    });
+                    sent = true;
+                } catch (e) {
+                    console.error('[Playwright] Failed to send screenshot:', e.message);
+                }
+            }
+        }
+    } catch (err) {
+        console.error(`[Playwright] Screenshot error:`, err.message);
+    } finally {
+        if (sent && fs.existsSync(path)) {
+            try {
+                fs.unlinkSync(path);
+                console.log(`[Playwright] Screenshot deleted: ${path}`);
+            } catch (cleanupErr) {
+                console.error('[Playwright] Failed to delete screenshot:', cleanupErr.message);
+            }
+        }
     }
 }
 
@@ -163,6 +208,8 @@ async function dismissPopups(page) {
  * Login to ChatGPT and save session as JSON string (for MongoDB storage)
  */
 async function loginAccount(account) {
+    const accountPassword = decryptSecret(account.password);
+    const accountTwoFASecret = decryptSecret(account.twoFASecret);
     // Login tanpa proxy — lebih stabil, proxy hanya untuk invite
     const browser = await launchBrowser(null);
     const context = await browser.newContext({
@@ -207,7 +254,7 @@ async function loginAccount(account) {
         console.log(`[Login][${account.email}] Step 3: Filling password...`);
         const passwordInput = await page.waitForSelector('input[type="password"], input[placeholder="Password"]', { timeout: 30000 });
         await randomDelay(1000, 2000);
-        await passwordInput.fill(account.password);
+        await passwordInput.fill(accountPassword);
         await randomDelay(1500, 3000);
         await page.click('button:has-text("Continue")');
         await randomDelay(5000, 8000);
@@ -216,7 +263,7 @@ async function loginAccount(account) {
         const currentUrlAfterPassword = page.url();
         if (currentUrlAfterPassword.includes('mfa-challenge')) {
             console.log(`[Login][${account.email}] Step 4: 2FA detected...`);
-            if (!account.twoFASecret) throw new Error('Akun memiliki 2FA tapi twoFASecret tidak diisi di database');
+            if (!accountTwoFASecret) throw new Error('Akun memiliki 2FA tapi twoFASecret tidak diisi di database');
 
             const codeInput = await page.waitForSelector('input[placeholder="One-time code"], input[placeholder="Code"]', { timeout: 15000 });
 
@@ -231,7 +278,7 @@ async function loginAccount(account) {
 
             // Generate token LANGSUNG sebelum fill — minimal delay
             // window: 1 = toleransi ±30 detik clock skew antara VPS dan server OpenAI
-            const token = speakeasy.totp({ secret: account.twoFASecret, encoding: 'base32', window: 1 });
+            const token = speakeasy.totp({ secret: accountTwoFASecret, encoding: 'base32', window: 1 });
             console.log(`[Login][${account.email}] Step 4: Mengisi kode 2FA...`);
             await codeInput.fill(token);
             await page.waitForTimeout(500);
@@ -245,7 +292,7 @@ async function loginAccount(account) {
                 // Tunggu window berikutnya pasti
                 const msNow = Date.now() % 30000;
                 await page.waitForTimeout(31000 - msNow);
-                const retryToken = speakeasy.totp({ secret: account.twoFASecret, encoding: 'base32', window: 1 });
+                const retryToken = speakeasy.totp({ secret: accountTwoFASecret, encoding: 'base32', window: 1 });
                 const retryInput = await page.waitForSelector('input[placeholder="One-time code"], input[placeholder="Code"]', { timeout: 10000 });
                 await retryInput.fill('');
                 await retryInput.fill(retryToken);
@@ -279,7 +326,7 @@ async function loginAccount(account) {
         console.log(`[Login][${account.email}] Final URL: ${currentUrl}`);
         const isLoggedIn = currentUrl.includes('chatgpt.com') && !currentUrl.includes('auth');
         if (!isLoggedIn) {
-            await sendScreenshotToAdmin(page, `login_failed_${account.email.split('@')[0]}`);
+            await sendScreenshotToLogChat(page, `login_failed_${account.email.split('@')[0]}`);
             throw new Error('Login gagal - URL masih di halaman auth: ' + currentUrl);
         }
 
@@ -287,7 +334,7 @@ async function loginAccount(account) {
         await browser.close();
         return { success: true, sessionData: JSON.stringify(sessionData) };
     } catch (error) {
-        try { await sendScreenshotToAdmin(page, `login_error_${account.email.split('@')[0]}`); } catch (_) { }
+        try { await sendScreenshotToLogChat(page, `login_error_${account.email.split('@')[0]}`); } catch (_) { }
         try { await browser.close(); } catch (_) { }
         return { success: false, message: error.message };
     }
@@ -345,7 +392,7 @@ async function inviteWithSession(account, targetEmail, proxy, nsName = null) {
 
         if (isSessionExpired) {
             console.log(`[Playwright][${targetEmail}] Session expired! (URL: ${currentUrl}, modal: ${sessionExpiredModal > 0}). Attempting auto re-login...`);
-            await sendScreenshotToAdmin(page, 'session_expired');
+            await sendScreenshotToLogChat(page, 'session_expired');
             await browser.close();
 
             // Auto re-login
@@ -391,7 +438,7 @@ async function inviteWithSession(account, targetEmail, proxy, nsName = null) {
         console.log(`[Playwright][${targetEmail}] Invite buttons found: ${inviteBtnCount}`);
 
         if (inviteBtnCount === 0) {
-            await sendScreenshotToAdmin(page, 'no_invite_btn');
+            await sendScreenshotToLogChat(page, 'no_invite_btn');
             await browser.close();
             return { success: false, message: 'Tombol "Invite team members" tidak ditemukan di sidebar.' };
         }
@@ -421,7 +468,7 @@ async function inviteWithSession(account, targetEmail, proxy, nsName = null) {
         }
 
         if (!emailFilled) {
-            await sendScreenshotToAdmin(page, 'no_email_input');
+            await sendScreenshotToLogChat(page, 'no_email_input');
             await browser.close();
             return { success: false, message: 'Input email tidak ditemukan di popup invite.' };
         }
@@ -433,7 +480,7 @@ async function inviteWithSession(account, targetEmail, proxy, nsName = null) {
         console.log(`[Playwright][${targetEmail}] Step 4: Clicking Next...`);
         const nextBtn = page.locator('button:has-text("Next")');
         if ((await nextBtn.count()) === 0) {
-            await sendScreenshotToAdmin(page, '4_no_next_btn');
+            await sendScreenshotToLogChat(page, '4_no_next_btn');
             await browser.close();
             return { success: false, message: 'Tombol "Next" tidak ditemukan.' };
         }
@@ -446,7 +493,7 @@ async function inviteWithSession(account, targetEmail, proxy, nsName = null) {
         console.log(`[Playwright][${targetEmail}] Step 5: Clicking Send invites...`);
         const sendBtn = page.locator('button:has-text("Send invites"), button:has-text("Send invite")');
         if ((await sendBtn.count()) === 0) {
-            await sendScreenshotToAdmin(page, '5_no_send_btn');
+            await sendScreenshotToLogChat(page, '5_no_send_btn');
             await browser.close();
             return { success: false, message: 'Tombol "Send invites" tidak ditemukan.' };
         }
@@ -471,14 +518,14 @@ async function inviteWithSession(account, targetEmail, proxy, nsName = null) {
             await browser.close();
             return { success: true, message: `Invite berhasil dikirim ke ${targetEmail}` };
         } else {
-            await sendScreenshotToAdmin(page, 'no_confirmation');
+            await sendScreenshotToLogChat(page, 'no_confirmation');
             await browser.close();
             return { success: false, message: `Tidak ada konfirmasi invite untuk ${targetEmail}. Cek screenshot.` };
         }
 
     } catch (error) {
         console.error(`[Playwright][${targetEmail}] Error:`, error.message);
-        try { await sendScreenshotToAdmin(page, 'error'); } catch (_) { }
+        try { await sendScreenshotToLogChat(page, 'error'); } catch (_) { }
         try { await browser.close(); } catch (_) { }
         return { success: false, message: `Error: ${error.message}` };
     }

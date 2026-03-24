@@ -11,6 +11,8 @@ const inviteJobSchema = new mongoose.Schema({
     guaranteeDays: { type: Number, default: 0 },
     guaranteeUntil: { type: Date, default: null },
     guaranteeClaimed: { type: Boolean, default: false },
+    guaranteeApprovedAt: { type: Date, default: null },
+    guaranteeApprovedBy: { type: String, default: null },
     createdAt: { type: Date, default: Date.now },
     processedAt: { type: Date, default: null },
 });

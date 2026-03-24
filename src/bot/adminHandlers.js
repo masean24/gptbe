@@ -8,6 +8,7 @@ const InviteJob = require('../models/InviteJob');
 const Settings = require('../models/Settings');
 const { loginAccount } = require('../services/playwrightService');
 const { notifyAdminCredit } = require('../services/notifyService');
+const { encryptSecret } = require('../services/secretService');
 
 const ADMIN_IDS = (process.env.ADMIN_IDS || '').split(',').map(id => id.trim()).filter(Boolean);
 
@@ -72,6 +73,20 @@ async function showAdminMenu(ctx) {
     if (ctx.callbackQuery) {
         await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
         await ctx.answerCallbackQuery();
+        if (false) {
+            const frontendUrl = process.env.FRONTEND_URL || '';
+            const secureText = frontendUrl
+                ? 'Gunakan admin panel web untuk menambah akun agar password dan secret 2FA tidak dikirim lewat Telegram.'
+                : 'Penambahan akun lewat Telegram dinonaktifkan. Gunakan admin API/web panel.';
+            const secureOpts = { parse_mode: 'Markdown', reply_markup: new InlineKeyboard().text('â¬…ï¸ Kembali', 'adm_back') };
+            try {
+                await ctx.editMessageText(secureText, secureOpts);
+            } catch (err) {
+                console.error('[adm_addaccount] secure fallback failed:', err.message);
+                await ctx.reply(secureText, secureOpts);
+            }
+            return;
+        }
     } else {
         await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: keyboard });
     }
@@ -101,6 +116,54 @@ function registerAdminHandlers(bot) {
     });
 
     bot.command('admin', adminOnly(showAdminMenu));
+
+    const addAccountInstruction = '➕ *TAMBAH AKUN CHATGPT*\n\nKirim lewat private chat bot dengan format:\n`/add email password [2fa_secret]`\n\nPesan command akan dihapus otomatis setelah akun berhasil ditambahkan.';
+    const addAccountInstructionOptions = {
+        parse_mode: 'Markdown',
+        reply_markup: new InlineKeyboard().text('⬅️ Kembali', 'adm_back'),
+    };
+
+    async function showAddAccountInstruction(ctx) {
+        try {
+            await ctx.editMessageText(addAccountInstruction, addAccountInstructionOptions);
+        } catch (err) {
+            console.error('[adm_addaccount] editMessageText failed:', err.message);
+            await ctx.reply(addAccountInstruction, addAccountInstructionOptions);
+        }
+    }
+
+    async function handleAddAccountCommand(ctx) {
+        if (ctx.chat?.type !== 'private') {
+            return ctx.reply('❌ Pakai command `/add` lewat private chat ke bot, bukan di grup.', { parse_mode: 'Markdown' });
+        }
+
+        const parts = ctx.message.text.trim().split(/\s+/);
+        if (parts.length < 3) {
+            return ctx.reply('❌ Format: `/add email password [2fa_secret]`', { parse_mode: 'Markdown' });
+        }
+
+        const [, email, password, twoFASecret = ''] = parts;
+        const existing = await Account.findOne({ email });
+        if (existing) return ctx.reply('❌ Email sudah terdaftar!');
+
+        const account = await Account.create({
+            email,
+            password: encryptSecret(password),
+            twoFASecret: encryptSecret(twoFASecret),
+        });
+
+        try {
+            await ctx.api.deleteMessage(ctx.chat.id, ctx.message.message_id);
+        } catch (err) {
+            console.error('[add] deleteMessage failed:', err.message);
+        }
+
+        const keyboard = new InlineKeyboard().text('🔑 Login Akun ini', `adm_login_${account._id}`);
+        await ctx.reply(
+            `✅ *Akun berhasil ditambahkan!*\n📧 Email: \`${email}\`\n🆔 ID: \`${account._id}\`\n\nPesan command sudah dibersihkan. Jangan lupa login akun ini agar bisa dipakai.`,
+            { parse_mode: 'Markdown', reply_markup: keyboard }
+        );
+    }
 
     // ---- STATS ----
     bot.callbackQuery('adm_stats', adminOnly(async (ctx) => {
@@ -150,7 +213,7 @@ function registerAdminHandlers(bot) {
         await ctx.answerCallbackQuery();
         const accounts = await Account.find().sort({ createdAt: -1 });
         if (!accounts.length) {
-            const kb = new InlineKeyboard().text('➕ Tambah Akun', 'adm_addaccount').row().text('⬅️ Kembali', 'adm_back');
+            const kb = new InlineKeyboard().text('➕ Tambah Akun', 'adm_addaccount_secure').row().text('⬅️ Kembali', 'adm_back');
             return ctx.editMessageText('📭 Belum ada akun ChatGPT.', { reply_markup: kb });
         }
 
@@ -165,7 +228,7 @@ function registerAdminHandlers(bot) {
         text += `\n_Klik tombol di bawah untuk mengelola akun:_`;
 
         const keyboard = new InlineKeyboard()
-            .text('➕ Tambah Akun', 'adm_addaccount').row()
+            .text('➕ Tambah Akun', 'adm_addaccount_secure').row()
             .text('🗑️ Hapus Akun', 'adm_delaccount_choose').row()
             .text('⬅️ Kembali', 'adm_back');
         await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: keyboard });
@@ -223,8 +286,26 @@ function registerAdminHandlers(bot) {
     }));
 
     // ---- ADD ACCOUNT (start flow) ----
+    bot.callbackQuery('adm_addaccount_secure', adminOnly(async (ctx) => {
+        await ctx.answerCallbackQuery();
+        return await showAddAccountInstruction(ctx);
+        const frontendUrl = process.env.FRONTEND_URL || '';
+        const text = frontendUrl
+            ? `Gunakan admin panel web untuk menambah akun agar password dan secret 2FA tidak dikirim lewat Telegram.\n\n${frontendUrl}/Maseans24`
+            : 'Penambahan akun lewat Telegram dinonaktifkan. Gunakan admin API/web panel.';
+        const opts = { parse_mode: 'Markdown', reply_markup: new InlineKeyboard().text('⬅️ Kembali', 'adm_back') };
+        try {
+            await ctx.editMessageText(text, opts);
+        } catch (err) {
+            console.error('[adm_addaccount_secure] editMessageText failed:', err.message);
+            await ctx.reply(text, opts);
+        }
+    }));
+
+    // Legacy callback retained for backward compatibility but no longer linked from UI
     bot.callbackQuery('adm_addaccount', adminOnly(async (ctx) => {
         await ctx.answerCallbackQuery();
+        return await showAddAccountInstruction(ctx);
         const text = '➕ *TAMBAH AKUN CHATGPT*\n\nKirim dalam format:\n`/addaccount email password 2fa_secret`\n\n`2fa_secret` boleh dikosongkan jika tidak ada 2FA.';
         const opts = { parse_mode: 'Markdown', reply_markup: new InlineKeyboard().text('⬅️ Kembali', 'adm_back') };
         try {
@@ -235,8 +316,17 @@ function registerAdminHandlers(bot) {
         }
     }));
 
-    // ---- /addaccount command ----
+    // ---- /add command ----
+    bot.command('add', adminOnly(handleAddAccountCommand));
     bot.command('addaccount', adminOnly(async (ctx) => {
+        return await handleAddAccountCommand(ctx);
+        {
+            const frontendUrl = process.env.FRONTEND_URL || '';
+            if (frontendUrl) {
+                return ctx.reply(`Penambahan akun lewat Telegram dinonaktifkan.\nGunakan admin panel web: ${frontendUrl}/Maseans24`, { parse_mode: 'Markdown' });
+            }
+            return ctx.reply('Penambahan akun lewat Telegram dinonaktifkan. Gunakan admin API/web panel.', { parse_mode: 'Markdown' });
+        }
         const parts = ctx.message.text.split(' ');
         if (parts.length < 3) {
             return ctx.reply('❌ Format: `/addaccount email password [2fa_secret]`', { parse_mode: 'Markdown' });

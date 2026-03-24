@@ -6,6 +6,8 @@ const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
+const mongoose = require('mongoose');
+const QRCode = require('qrcode');
 const User = require('./models/User');
 const WebUser = require('./models/WebUser');
 const Account = require('./models/Account');
@@ -19,6 +21,7 @@ const { enqueue } = require('./services/queueService');
 const { notifyRedeemUsed, notifyPaymentReceived, notifyNewWebOrder, notifyNewWebRegistration, notifyGuaranteeClaim, notifyAdminCredit } = require('./services/notifyService');
 const { sendRedeemCode } = require('./services/emailService');
 const { checkAccount } = require('./services/checkerService');
+const { encryptSecret } = require('./services/secretService');
 
 const app = express();
 
@@ -67,11 +70,19 @@ function adminMiddleware(req, res, next) {
     next();
 }
 
-function webUserMiddleware(req, res, next) {
+async function webUserMiddleware(req, res, next) {
     if (!req.user?.webUserId) {
         return res.status(403).json({ error: 'Web user auth required' });
     }
-    next();
+    try {
+        const user = await WebUser.findById(req.user.webUserId);
+        if (!user) return res.status(404).json({ error: 'User tidak ditemukan' });
+        if (user.isBlocked) return res.status(403).json({ error: 'Akun diblokir. Hubungi admin.' });
+        req.webUser = user;
+        next();
+    } catch (_) {
+        return res.status(500).json({ error: 'Server error' });
+    }
 }
 
 // =========================================================
@@ -256,6 +267,75 @@ app.post('/api/web/user/redeem', authMiddleware, webUserMiddleware, async (req, 
         const { code } = req.body;
         if (!code) return res.status(400).json({ error: 'Kode redeem diperlukan' });
 
+        const webUserDoc = req.webUser;
+        const normalizedCode = code.trim().toUpperCase();
+        const session = await mongoose.startSession();
+        let redeemCodeDoc = null;
+        let updatedWebUser = null;
+
+        try {
+            await session.withTransaction(async () => {
+                redeemCodeDoc = await RedeemCode.findOneAndUpdate(
+                    {
+                        code: normalizedCode,
+                        isUsed: false,
+                        $or: [
+                            { expiresAt: null },
+                            { expiresAt: { $gt: new Date() } },
+                        ],
+                    },
+                    {
+                        $set: {
+                            isUsed: true,
+                            usedBy: `webuser_${webUserDoc._id}`,
+                            usedAt: new Date(),
+                        },
+                    },
+                    { new: true, session }
+                );
+
+                if (!redeemCodeDoc) throw new Error('INVALID_OR_USED');
+
+                const redeemTier = redeemCodeDoc.tier || 'basic';
+                const creditField = `credits_${redeemTier}`;
+                updatedWebUser = await WebUser.findByIdAndUpdate(
+                    webUserDoc._id,
+                    { $inc: { [creditField]: redeemCodeDoc.credits } },
+                    { new: true, session }
+                );
+
+                const redeemTierLabel = { basic: 'Basic', standard: 'Standard', premium: 'Premium' };
+                await Transaction.create([{
+                    telegramId: `webuser_${webUserDoc._id}`,
+                    type: 'redeem',
+                    credits: redeemCodeDoc.credits,
+                    tier: redeemTier,
+                    redeemCode: normalizedCode,
+                    description: `Redeem code ${normalizedCode} (+${redeemCodeDoc.credits} kredit ${redeemTierLabel[redeemTier]})`,
+                }], { session });
+            });
+        } finally {
+            await session.endSession();
+        }
+
+        if (!redeemCodeDoc || !updatedWebUser) {
+            return res.status(400).json({ error: 'Kode tidak valid, sudah digunakan, atau kedaluwarsa' });
+        }
+
+        const redeemTier = redeemCodeDoc.tier || 'basic';
+        const redeemTierLabel = { basic: 'Basic', standard: 'Standard', premium: 'Premium' };
+
+        await ActivityLog.create({ userId: `webuser_${webUserDoc._id}`, userEmail: webUserDoc.email, action: 'redeem', details: { code: normalizedCode, credits: redeemCodeDoc.credits, tier: redeemTier }, ip: req.ip }).catch(() => {});
+        await notifyRedeemUsed(normalizedCode, redeemCodeDoc.credits, 'web');
+
+        return res.json({
+            success: true,
+            creditsAdded: redeemCodeDoc.credits,
+            tier: redeemTier,
+            newBalance: updatedWebUser.credits,
+            message: `+${redeemCodeDoc.credits} kredit ${redeemTierLabel[redeemTier]} berhasil ditambahkan!`,
+        });
+
         const user = await WebUser.findById(req.user.webUserId);
         if (!user) return res.status(404).json({ error: 'User tidak ditemukan' });
 
@@ -386,24 +466,28 @@ app.get('/api/web/job/:jobId', authMiddleware, webUserMiddleware, async (req, re
 app.post('/api/web/user/pay', authMiddleware, webUserMiddleware, async (req, res) => {
     try {
         const { credits = 1, tier = 'basic' } = req.body;
+        const creditCount = parseInt(credits, 10);
         if (!['basic', 'standard', 'premium'].includes(tier)) return res.status(400).json({ error: 'Tier tidak valid' });
+        if (!Number.isInteger(creditCount) || creditCount < 1 || creditCount > 100) {
+            return res.status(400).json({ error: 'Jumlah kredit tidak valid' });
+        }
 
-        const user = await WebUser.findById(req.user.webUserId);
-        if (!user) return res.status(404).json({ error: 'User tidak ditemukan' });
-
-        const payment = await createPayment(`webuser_${user._id}`, credits, tier);
+        const user = req.webUser;
+        const payment = await createPayment(`webuser_${user._id}`, creditCount, tier);
+        const qrisImageDataUrl = await QRCode.toDataURL(payment.qrisContent, { width: 320 });
 
         // Log activity
-        await ActivityLog.create({ userId: `webuser_${user._id}`, userEmail: user.email, action: 'buy_credit', details: { credits, tier, amount: payment.amountTotal }, ip: req.ip }).catch(() => {});
+        await ActivityLog.create({ userId: `webuser_${user._id}`, userEmail: user.email, action: 'buy_credit', details: { credits: creditCount, tier, amount: payment.amountTotal }, ip: req.ip }).catch(() => {});
 
         res.json({
             success: true,
             transactionId: payment.transactionId,
             qrisContent: payment.qrisContent,
+            qrisImageDataUrl,
             amountTotal: payment.amountTotal,
             amountUnique: payment.amountUnique,
             expiresAt: payment.expiresAt,
-            credits,
+            credits: creditCount,
             tier,
         });
     } catch (err) {
@@ -417,15 +501,14 @@ app.post('/api/web/user/pay', authMiddleware, webUserMiddleware, async (req, res
 // =========================================================
 // PUBLIC: Check payment status
 // =========================================================
-app.get('/api/web/pay/status/:transactionId', authMiddleware, async (req, res) => {
+app.get('/api/web/pay/status/:transactionId', authMiddleware, webUserMiddleware, async (req, res) => {
     const { transactionId } = req.params;
-    const txn = await Transaction.findOne({ qrisTransactionId: transactionId, type: 'qris' });
+    const txn = await Transaction.findOne({
+        qrisTransactionId: transactionId,
+        type: 'qris',
+        telegramId: `webuser_${req.user.webUserId}`,
+    });
     if (!txn) return res.status(404).json({ error: 'Transaksi tidak ditemukan' });
-
-    // Verify ownership: match user id from token to transaction
-    if (req.user?.webUserId && txn.telegramId !== `webuser_${req.user.webUserId}`) {
-        return res.status(403).json({ error: 'Unauthorized' });
-    }
 
     if (txn.qrisStatus === 'pending') {
         const ageMs = Date.now() - new Date(txn.createdAt).getTime();
@@ -541,9 +624,6 @@ app.post('/api/webhooks/qris', async (req, res) => {
                 const webUser = await WebUser.findById(webUserId);
                 if (webUser) {
                     const tier = result.tier || 'basic';
-                    const creditField = `credits_${tier}`;
-                    webUser[creditField] = (webUser[creditField] || 0) + (result.creditsAdded || 1);
-                    await webUser.save();
                     await ActivityLog.create({ userId: result.telegramId, userEmail: webUser.email, action: 'payment_received', details: { amount: result.amount || CREDIT_PRICE, credits: result.creditsAdded || 1, tier } }).catch(() => {});
                 }
                 await notifyPaymentReceived(result.amount || CREDIT_PRICE, result.creditsAdded || 1, 'web-dashboard');
@@ -611,28 +691,67 @@ app.get('/api/admin/guarantee-claims', authMiddleware, adminMiddleware, async (r
 
 app.post('/api/admin/guarantee-claims/:jobId/approve', authMiddleware, adminMiddleware, async (req, res) => {
     try {
-        const job = await InviteJob.findById(req.params.jobId);
-        if (!job) return res.status(404).json({ error: 'Job tidak ditemukan' });
-        if (!job.guaranteeClaimed) return res.status(400).json({ error: 'Belum di-claim' });
+        const session = await mongoose.startSession();
+        let approvedJob = null;
 
-        // Give back 1 credit of the same tier
-        const userId = job.telegramId;
-        const tier = job.tier || 'basic';
-        const creditField = `credits_${tier}`;
+        try {
+            await session.withTransaction(async () => {
+                approvedJob = await InviteJob.findOneAndUpdate(
+                    {
+                        _id: req.params.jobId,
+                        guaranteeClaimed: true,
+                        guaranteeApprovedAt: null,
+                    },
+                    {
+                        $set: {
+                            guaranteeApprovedAt: new Date(),
+                            guaranteeApprovedBy: req.user.telegramId || 'admin',
+                        },
+                    },
+                    { new: true, session }
+                );
 
-        if (userId.startsWith('webuser_')) {
-            const webUserId = userId.replace('webuser_', '');
-            const user = await WebUser.findById(webUserId);
-            if (user) {
-                user[creditField] = (user[creditField] || 0) + 1;
-                await user.save();
-            }
-        } else {
-            await User.findOneAndUpdate({ telegramId: userId }, { $inc: { [creditField]: 1 } });
+                if (!approvedJob) {
+                    throw new Error('CLAIM_ALREADY_PROCESSED');
+                }
+
+                const userId = approvedJob.telegramId;
+                const tier = approvedJob.tier || 'basic';
+                const creditField = `credits_${tier}`;
+
+                if (userId.startsWith('webuser_')) {
+                    const webUserId = userId.replace('webuser_', '');
+                    const user = await WebUser.findByIdAndUpdate(
+                        webUserId,
+                        { $inc: { [creditField]: 1 } },
+                        { new: true, session }
+                    );
+                    if (!user) throw new Error('USER_NOT_FOUND');
+                } else {
+                    const user = await User.findOneAndUpdate(
+                        { telegramId: userId },
+                        { $inc: { [creditField]: 1 } },
+                        { new: true, session }
+                    );
+                    if (!user) throw new Error('USER_NOT_FOUND');
+                }
+            });
+        } finally {
+            await session.endSession();
         }
 
-        res.json({ success: true, message: `1 kredit ${tier} dikembalikan ke user` });
+        if (!approvedJob) {
+            return res.status(400).json({ error: 'Claim sudah diproses atau belum di-claim' });
+        }
+
+        res.json({ success: true, message: `1 kredit ${approvedJob.tier || 'basic'} dikembalikan ke user` });
     } catch (err) {
+        if (err.message === 'CLAIM_ALREADY_PROCESSED') {
+            return res.status(400).json({ error: 'Claim sudah diproses atau belum di-claim' });
+        }
+        if (err.message === 'USER_NOT_FOUND') {
+            return res.status(404).json({ error: 'User tidak ditemukan' });
+        }
         res.status(500).json({ error: 'Server error' });
     }
 });
@@ -719,7 +838,11 @@ app.post('/api/admin/accounts', authMiddleware, adminMiddleware, async (req, res
     if (!email || !password) return res.status(400).json({ error: 'email and password required' });
     const existing = await Account.findOne({ email });
     if (existing) return res.status(400).json({ error: 'Email sudah terdaftar' });
-    const acc = await Account.create({ email, password, twoFASecret });
+    const acc = await Account.create({
+        email,
+        password: encryptSecret(password),
+        twoFASecret: twoFASecret ? encryptSecret(twoFASecret) : '',
+    });
     res.json({ success: true, id: acc._id });
 });
 
